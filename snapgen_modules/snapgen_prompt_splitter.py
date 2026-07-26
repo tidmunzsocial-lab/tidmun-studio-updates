@@ -29,6 +29,8 @@ RULES:
 - ถ้าข้อมูลตัวละครขาด ให้เติมเองและใส่ "(สมมุติเพื่อภาพ)"
 - prompt ต้องเรียงตาม beat ของฉาก
 - สร้าง 10 prompts + prompt 11 เป็น storyboard grid summary
+- ถ้าในเฟรมมีคนหรือตัวละคร ห้ามถ่ายไกล ให้ถ่ายใกล้เท่านั้น เลนส์ 50mm ถึง 105mm
+- ถ้าในเฟรมไม่มีคน จะใช้มุมไกลหรือเลนส์กว้างก็ได้
 
 OUTPUT FORMAT:
 ตอบเป็น JSON เท่านั้น ห้าม markdown ห้ามคำอธิบายเพิ่ม
@@ -197,6 +199,23 @@ def render_prompts_text(result: dict[str, Any]) -> str:
     lines = []
     for p in prompts:
         if isinstance(p, dict):
+            txt = str(p.get("prompt", "")).strip()
+            # Force shot-distance correction: if a person is in frame,
+            # replace wide/long shot with medium shot so faces stay sharp.
+            _has_person = bool(re.search(
+                r"(?:คน|ตัวละคร|ชาย|หญิง|เด็ก|ผู้หญิง|ผู้ชาย|girl|boy|man|woman|child|person|character|ชด|พิม)",
+                txt, re.I,
+            ))
+            if _has_person:
+                # ถ้ามีคน ห้ามถ่ายไกล — แทนมุมไกลเป็นมุมใกล้ เลนส์ 50-105mm
+                txt = re.sub(
+                    r"(?:wide\s+shot|long\s+shot|establishing\s+shot|full\s+body\s+shot|extreme\s+wide|full\s+shot|มุมกว้าง|มุมไกล|ถ่ายกว้าง|ถ่ายไกล|ภาพกว้าง)",
+                    "medium shot, เลนส์ 50mm", txt, flags=re.I,
+                )
+                # แทนเลนส์กว้าง (ต่ำกว่า 50mm) เป็น 50mm
+                txt = re.sub(r"เลนส์\s*(?:24|28|35)mm", "เลนส์ 50mm", txt, flags=re.I)
+                txt = re.sub(r"lens\s*(?:24|28|35)mm", "lens 50mm", txt, flags=re.I)
+                p["prompt"] = txt
             lines.append(f"{p.get('number')}. {p.get('prompt', '').strip()}")
     return "\n\n".join(lines).strip()
 

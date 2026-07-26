@@ -241,6 +241,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
     # the user explicitly asks it to create an image, so enforce that same
     # intent centrally for every SnapGen page without changing visual details.
     submitted_prompt = str(prompt or "").strip()
+
     if not re.match(r"^(?:สร้าง|วาด|generate|create|make)\s*(?:รูป|ภาพ|image|an?\s+image)", submitted_prompt, re.I):
         action = "แก้ไขและสร้างรูปภาพใหม่จริงหนึ่งรูป" if is_edit else "สร้างรูปภาพจริงหนึ่งรูป"
         submitted_prompt = (

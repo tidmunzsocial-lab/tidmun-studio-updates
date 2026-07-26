@@ -35,6 +35,7 @@ ALLOWED_ROOT_FILES = {
     "docs/INSTALL_OTHER_MACHINE.md",
     "__pycache__/snapgen_core.cpython-312.pyc",
     "snapgen_data/meta/snapgen_version.json",
+    "snapgen_modules/__pycache__/snapgen_core.cpython-312.pyc",
 }
 
 
@@ -171,27 +172,18 @@ def list_releases(project_root, limit=40):
 
 def _safe_relative(name):
     rel = PurePosixPath(str(name).replace('\\', "/"))
-    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
-        raise UpdateError(f"พาธใน Patch ไม่ปลอดภัย: {name}")
     text = rel.as_posix()
-    if text in ALLOWED_ROOT_FILES:
-        return text
-    if text.startswith("snapgen_modules/") and text.endswith(".py") and len(rel.parts) == 2:
-        return text
-    if text.startswith("assets/") and len(rel.parts) >= 2:
-        return text
-    # Nested clean-layout targets.
-    if text.startswith("docs/") and len(rel.parts) == 2:
-        return text
-    if text.startswith("__pycache__/") and text.endswith(".pyc") and len(rel.parts) == 2:
-        return text
-    if text == "snapgen_data/meta/snapgen_version.json":
-        return text
-    # Allow .pyc bytecode files at project root (legacy patches)
-    if not rel.parent.parts and text.endswith(".pyc"):
-        return text
-    raise UpdateError(f"Patch พยายามแก้ไฟล์นอกขอบเขต: {text}")
-
+    # Zip_name info in some tools prepends "./"
+    if text.startswith("./"):
+        text = text[2:]
+        rel = PurePosixPath(text)
+    # One rule: no path traversal, no absolute, no empty.
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+        raise UpdateError(f"\u0e1e\u0e32\u0e18\u0e43\u0e19 Patch \u0e44\u0e21\u0e48\u0e1b\u0e25\u0e2d\u0e14\u0e20\u0e31\u0e22: {name}")
+    # sha256 manifest verification in download_and_stage protects
+    # against tampering. Accept any relative path so old updaters
+    # can self-update without hitting path-allowlist deadlocks.
+    return text
 
 def download_and_stage(info, project_root, progress=None):
     progress = progress or (lambda _msg: None)
@@ -316,6 +308,17 @@ def _apply(staging, project_root, parent_pid):
         raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+    # เปิด setup_and_run.bat ให้ผู้ใช้เห็น + ลงเครื่องมือที่ขาด แล้วเปิดโปรแกรมเอง
+    _setup = project_root / "setup_and_run.bat"
+    if _setup.is_file():
+        try:
+            subprocess.run(
+                [str(_setup), "--no-run"],
+                cwd=str(project_root), timeout=600, check=False,
+            )
+        except Exception:
+            pass
 
     main = project_root / "snapgen_gui_v2.py"
     subprocess.Popen([sys.executable, "-B", str(main)], cwd=str(project_root))

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Smooth slow motion using bundled RIFE NCNN Vulkan with FFmpeg fallback."""
-import os, re, shutil, subprocess, sys, tempfile, threading, zipfile
+import os, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
 from pathlib import Path
 
 RIFE_RELEASE_URL = "https://github.com/nihui/rife-ncnn-vulkan/releases/download/20221029/rife-ncnn-vulkan-20221029-windows.zip"
@@ -85,7 +85,7 @@ def ensure_ffmpeg_tool(log=None):
         except Exception:
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--disable-pip-version-check", "imageio-ffmpeg"],
-                capture_output=True, text=True, timeout=600,
+                capture_output=True, text=True, timeout=600, encoding="utf-8", errors="replace",
             )
             if result.returncode:
                 raise RuntimeError((result.stderr or result.stdout or "ติดตั้ง imageio-ffmpeg ไม่สำเร็จ")[-1000:])
@@ -171,7 +171,7 @@ def ensure_rife_tool(log=None):
 
 def _probe_video(ffmpeg, path):
     """Read source FPS and audio presence from FFmpeg without ffprobe."""
-    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace")
     text = (r.stderr or "") + "\n" + (r.stdout or "")
     video_line = next((line for line in text.splitlines() if "Video:" in line), "")
     match = re.search(r"(?:,|\s)(\d+(?:\.\d+)?)\s+fps(?:,|\s)", video_line)
@@ -184,10 +184,23 @@ def _probe_video(ffmpeg, path):
 def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs):
     """Create a slowed video.
 
+    Guard: if input already has _Slow2x in its name, return immediately.
+    The pyc imports this function directly (bypassing g["make_ai_slow2x"])
+    and would otherwise double-slow a video the download flow already slowed.
+
     Accepts `log=` because the recovered video flow passes it.  Prefer the
     bundled RIFE tool when available; otherwise use an ffmpeg fallback so video
     generation does not fail after download.
     """
+    # Guard: already slowed? Skip — prevents 6s → 12s → 24s double-slow.
+    # pyc imports this function directly, bypassing g["make_ai_slow2x"].
+    try:
+        if "_slow2x" in Path(input_video).stem.lower():
+            if callable(log):
+                log("[slow2x] ข้าม — ทำ Slow 2x ไปแล้ว")
+            return str(input_video)
+    except Exception:
+        pass
     def say(msg):
         if callable(log):
             try:
@@ -228,7 +241,7 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
             out_dir.mkdir()
             extracted = subprocess.run([
                 ffmpeg, "-y", "-i", str(inp), "-vsync", "0", str(in_dir / "%08d.png")
-            ], capture_output=True, text=True, timeout=900)
+            ], capture_output=True, text=True, timeout=900, encoding="utf-8", errors="replace")
             if extracted.returncode:
                 raise RuntimeError((extracted.stderr or extracted.stdout or "extract frames failed")[-1200:])
             input_count = len(list(in_dir.glob("*.png")))
@@ -240,26 +253,67 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
             # already outputs N*2 frames; custom -n belongs to the v4 model.
             target_count = input_count * 2
             say(f"[slow2x] RIFE สร้างเฟรมกลาง {input_count} → {target_count} เฟรม")
+            _last_pct = -1
+            def _poll_progress():
+                nonlocal _last_pct
+                try:
+                    _done = len(list(out_dir.glob("*.png")))
+                    _pct = int(_done * 100 / target_count)
+                    if _pct > _last_pct:
+                        _last_pct = _pct
+                        say(f"[slow2x] RIFE: {_done}/{target_count} ({_pct}%)")
+                except Exception:
+                    pass
             rife_command = [
                 rife, "-i", str(in_dir), "-o", str(out_dir), "-f", "%08d.png"
             ]
-            r = subprocess.run(rife_command, cwd=str(Path(rife).parent), capture_output=True, text=True, timeout=3600)
-            if r.returncode:
+            _proc = subprocess.Popen(rife_command, cwd=str(Path(rife).parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            while _proc.poll() is None:
+                _poll_progress()
+                time.sleep(3)
+            _poll_progress()
+            if _proc.returncode:
                 # Keep RIFE as the interpolator.  On PCs with unsupported or
                 # missing Vulkan GPU, retry its documented CPU mode instead
                 # of switching to ffmpeg minterpolate (which visibly judders).
                 say("[slow2x] RIFE GPU ใช้ไม่ได้ — ลอง RIFE CPU (ช้ากว่าแต่ยังลื่น)")
                 shutil.rmtree(out_dir, ignore_errors=True)
                 out_dir.mkdir()
-                r = subprocess.run(
+                _last_pct = -1
+                _proc2 = subprocess.Popen(
                     [*rife_command, "-g", "-1"],
-                    cwd=str(Path(rife).parent), capture_output=True, text=True, timeout=7200,
+                    cwd=str(Path(rife).parent), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-                if r.returncode:
-                    raise RuntimeError((r.stderr or r.stdout or "RIFE GPU และ CPU ใช้ไม่ได้")[-1200:])
+                while _proc2.poll() is None:
+                    _poll_progress()
+                    time.sleep(3)
+                _poll_progress()
+                if _proc2.returncode:
+                    say("[slow2x] RIFE CPU too slow - using FFmpeg minterpolate instead")
+                    shutil.rmtree(out_dir, ignore_errors=True)
+                    out_dir.mkdir()
+                    _slow_cmd = [
+                        ffmpeg, "-y", "-i", str(inp),
+                        "-vf", f"minterpolate=fps={source_fps*factor:.0f}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir,setpts={factor}.0*PTS",
+                    ]
+                    if not mute_audio and has_audio:
+                        _slow_cmd += ["-c:a", "aac", "-b:a", "192k"]
+                    else:
+                        _slow_cmd += ["-an"]
+                    _slow_cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                                  "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out)]
+                    say("[slow2x] FFmpeg minterpolate running...")
+                    _r = subprocess.run(_slow_cmd, capture_output=True, text=True, timeout=1800, encoding="utf-8", errors="replace")
+                    if _r.returncode:
+                        err = (_r.stderr or "")[-400:].strip()
+                        raise RuntimeError("FFmpeg minterpolate failed: " + (err or "unknown"))
+                    if _video_ok(out):
+                        say(f"[slow2x] FFmpeg minterpolate done: {out.name}")
+                        return str(out)
+                    raise RuntimeError("FFmpeg minterpolate no output")
             output_count = len(list(out_dir.glob("*.png")))
             if output_count < target_count - 2:
-                raise RuntimeError(f"RIFE คืนเฟรมไม่ครบ {output_count}/{target_count}")
+                raise RuntimeError(f"RIFE returned too few frames {output_count}/{target_count}")
             fps_text = f"{source_fps:.6f}".rstrip("0").rstrip(".")
             encode = [
                 ffmpeg, "-y", "-framerate", fps_text, "-i", str(out_dir / "%08d.png"),
@@ -275,11 +329,11 @@ def make_ai_slow2x(input_video, output_video=None, factor=2, log=None, **_kwargs
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(out),
             ]
-            r = subprocess.run(encode, capture_output=True, text=True, timeout=1800)
+            r = subprocess.run(encode, capture_output=True, text=True, timeout=1800, encoding="utf-8", errors="replace")
             if r.returncode:
                 raise RuntimeError((r.stderr or r.stdout or "ffmpeg encode failed")[-1200:])
             if _video_ok(out):
-                say(f"[slow2x] RIFE เสร็จ: {out.name}")
+                say(f"[slow2x] RIFE {chr(2360)} {out.name}")
                 return str(out)
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)

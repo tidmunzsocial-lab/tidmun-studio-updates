@@ -87,6 +87,10 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     ref_label = tk.Label(ref_row, text="ไม่มีโฟลเดอร์อ้างอิง", fg="#555", bg=BG, anchor="w")
     choose_btn = _btn(ref_row, "📂 เลือกโฟลเดอร์อ้างอิง", ORANGE, g.get("browse_ref_folder"))
     choose_btn.pack(side="left", padx=(0, 8))
+    attach_btn = _btn(ref_row, "📎 แนบรูป", CYAN, _attach_refs, padx=8)
+    attach_btn.pack(side="left", padx=(0, 4))
+    latest_btn = _btn(ref_row, "📌 ล่าสุด", PINK, _attach_latest_img, padx=8)
+    latest_btn.pack(side="left", padx=(0, 4))
     ref_label.pack(side="left")
     tk.Label(ref_row, textvariable=ref_names_var, fg="#1565C0", bg=BG, anchor="w",
              font=("Leelawadee UI", 9)).pack(side="left", fill="x", expand=True, padx=(8, 0))
@@ -174,6 +178,46 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
 
     manual_refs = []
     folder_ref_names = []
+
+    def _attach_refs():
+        from tkinter import filedialog
+        files = filedialog.askopenfilenames(title="แนบรูป", filetypes=[("Images", "*.png *.jpg *.jpeg *.webp")])
+        if not files:
+            return
+        for old_ref in manual_refs:
+            remove_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(old_ref))[0])
+        manual_refs[:] = list(files)[:10]
+        for path in manual_refs:
+            set_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(path))[0], append=True)
+        _save_ref_state()
+        _log(f"✅ แนบ {len(manual_refs)} รูป")
+        _update_ref_highlight(log=True)
+
+    def _clear_refs():
+        for old_ref in manual_refs:
+            remove_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(old_ref))[0])
+        manual_refs.clear(); _save_ref_state(); _log("ล้างรูปแนบแล้ว"); _update_ref_highlight()
+
+    def _attach_latest_img():
+        try:
+            d = export_image_dir or g.get("EXPORT_IMAGE")
+            if not d or not os.path.isdir(str(d)):
+                _log("ยังไม่มีรูปที่สร้าง"); return
+            all_files = sorted(
+                [os.path.join(str(d), f) for f in os.listdir(str(d)) if f.lower().endswith((".png",".jpg",".jpeg",".webp"))],
+                key=os.path.getmtime, reverse=True
+            )
+            for f in all_files:
+                if f not in manual_refs:
+                    manual_refs.append(f)
+                    set_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(f))[0], append=True)
+                    _save_ref_state()
+                    _log(f"แนบ {os.path.basename(f)}")
+                    _update_ref_highlight(log=True)
+                    return
+            _log("แนบรูปครบทุกภาพแล้ว")
+        except Exception as exc:
+            _log(f"ผิดพลาด: {exc}")
 
     def _log(msg):
         append_log(log_box, msg)
@@ -853,6 +897,8 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     def _attach_refs():
         from tkinter import filedialog
         files = filedialog.askopenfilenames(title="แนบรูป", filetypes=[("Images", "*.png *.jpg *.jpeg *.webp")])
+        if not files:
+            return
         for old in manual_refs:
             remove_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(old))[0])
         manual_refs[:] = list(files)[:10]

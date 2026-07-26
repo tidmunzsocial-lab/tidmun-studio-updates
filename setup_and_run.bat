@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 title SnapGen - Auto Setup ^& Run
@@ -563,12 +563,6 @@ if /I "%~1"=="--check" (
   exit /b 0
 )
 if /I "%~1"=="--no-run" (
-  echo.
-  echo ============================================
-  echo   Check complete. SnapGen is ready to run.
-  echo ============================================
-  echo.
-  pause
   exit /b 0
 )
 

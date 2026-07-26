@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """Portable system check/repair used by Settings on every Windows machine.
 
 Never assume a developer username, drive letter, Git, uv, winget, or a
@@ -445,6 +445,14 @@ def repair_all(project_root, bridge_dir=None, log=print, patch_bridge=None, brid
         failures.append(f"RIFE AI Slow 2x: {exc}")
         log(f"✗ RIFE AI Slow 2x: {exc}")
 
+    try:
+        import ai_upscale
+        w2x = ai_upscale.ensure_waifu2x_tool(log=log)
+        log("✓ Resize+sharpen ready")
+    except Exception as exc:
+        failures.append(f"Resize+sharpen: {exc}")
+        log(f"✗ Resize+sharpen: {exc}")
+
     bridge_python = None
     try:
         tailscale_exe = _ensure_tailscale(log)
@@ -465,18 +473,156 @@ def repair_all(project_root, bridge_dir=None, log=print, patch_bridge=None, brid
         failures.append(f"Bridge: {exc}")
         log(f"✗ Bridge: {exc}")
 
-    required_files = (
+    # Check only critical files that make the app unable to start.
+    # Optional modules (ai_upscale, .ico, etc.) are checked later individually.
+    _critical = (
         root / "snapgen_gui_v2.py",
-        root / "__pycache__" / "snapgen_gui_v2.cpython-312.pyc",
+        root / "__pycache__" / "snapgen_core.cpython-312.pyc",
         root / "snapgen_modules" / "snapgen_page_video.py",
         root / "snapgen_modules" / "snapgen_page_image.py",
     )
-    missing_files = [str(p) for p in required_files if not p.is_file()]
-    if missing_files:
-        failures.append("ไฟล์โปรแกรมไม่ครบ: " + ", ".join(missing_files))
-        log("✗ ไฟล์โปรแกรมไม่ครบ — ต้องคัดลอกทั้งโฟลเดอร์ Project snapgen.ai")
+    _missing_critical = [str(p) for p in _critical if not p.is_file()]
+    if _missing_critical:
+        failures.append("ไฟล์หลักขาด: " + ", ".join(_missing_critical))
+        log("✗ ไฟล์หลักไม่ครบ — ต้องคัดลอกทั้งโฟลเดอร์ Project snapgen.ai")
     else:
-        log("✓ ไฟล์หลักของโปรแกรมครบ")
+        log("✓ ไฟล์หลักครบ")
+
+    # ── Pipeline test: ใช้ไฟล์วิดีโอจริงใน export/video ─────────────────
+    try:
+        log("=== ทดสอบ Pipeline: FFmpeg → AI Upscale → AI Slow 2x ===")
+        _test_480p = None
+        ffmpeg = _find_ffmpeg(root) or "ffmpeg"
+        _videos = sorted([p for p in (root / "export" / "video").glob("*.mp4") if "_slow2x" not in p.stem.lower() and "_pipe_" not in p.stem], key=lambda p: p.stat().st_mtime, reverse=True)
+        _test_src = _videos[0] if _videos else None
+        if _test_src is None or not _test_src.is_file():
+            log("⚠ ไม่มีวิดีโอใน export/video — ข้ามทดสอบ Pipeline")
+        else:
+            log(f"✓ ใช้วิดีโอ: {_test_src.name} ({_test_src.stat().st_size} bytes)")
+            # ย่อเป็น 480p สำหรับทดสอบ (ถ้าต้นฉบับสูงกว่า)
+            _test_480p = _test_src.with_name("_pipe_480p.mp4")
+            _r480 = _run([ffmpeg, "-y", "-i", str(_test_src),
+                          "-vf", "scale=-2:480:flags=lanczos",
+                          "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                          str(_test_480p)], timeout=60)
+            if _r480.returncode == 0 and _test_480p.is_file():
+                log(f"✓ ย่อเป็น 480p สำหรับทดสอบ")
+                _test_src = _test_480p
+            else:
+                log("⚠ ย่อ 480p ไม่สำเร็จ — ใช้ต้นฉบับ")
+            # ทดสอบ FFmpeg Lanczos resize 480/720 → 1080
+            _r1080 = _test_src.with_name("_pipe_1080p.mp4")
+            _t0 = time.time()
+            _r = _run([ffmpeg, "-y", "-i", str(_test_src),
+                       "-vf", "scale=-2:1080:flags=lanczos",
+                       "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                       str(_r1080)], timeout=60)
+            _t = time.time() - _t0
+            if _r.returncode == 0 and _r1080.is_file():
+                log(f"✓ FFmpeg resize →1080p: {_t:.0f}วินาที")
+            else:
+                log(f"✗ FFmpeg resize ล้มเหลว: {(_r.stderr or '')[-200:]}")
+            _r1080.unlink(missing_ok=True)
+            # ทดสอบ waifu2x AI Upscale
+            _w2x_out = _test_src.with_name("_pipe_w2x.mp4")
+            try:
+                import ai_upscale as _aup
+                _t0 = time.time()
+                _aup.upscale_video_ai(str(_test_src), output_video=str(_w2x_out),
+                                      target_height=720, log=log)
+                _t = time.time() - _t0
+                if _w2x_out.is_file():
+                    log(f"✓ waifu2x 2x upscale: {_t:.0f}วินาที")
+                else:
+                    log("✗ waifu2x ล้มเหลว (ไม่มี output)")
+            except Exception as _e:
+                log(f"✗ waifu2x ล้มเหลว: {_e}")
+            _w2x_out.unlink(missing_ok=True)
+            # ทดสอบ RIFE Slow 2x
+            _slow_out = _test_src.with_name("_pipe_slow2x.mp4")
+            try:
+                import ai_slow2x as _as2x
+                _t0 = time.time()
+                _as2x.make_ai_slow2x(str(_test_src), output_video=str(_slow_out),
+                                     factor=2, log=log)
+                _t = time.time() - _t0
+                if _slow_out.is_file():
+                    log(f"✓ RIFE Slow 2x: {_t:.0f}วินาที")
+                else:
+                    log("✗ RIFE Slow 2x ล้มเหลว")
+            except Exception as _e:
+                log(f"✗ RIFE Slow 2x ล้มเหลว: {_e}")
+            _slow_out.unlink(missing_ok=True)
+            # ── ทดสอบ Full Pipeline: 480p→AI720→FF1080→Slow2x ──
+            log("--- Full Pipeline: 480p→waifu2x 720p→FF 1080p→Slow2x ---")
+            _full_ai = _test_src.with_name("_pipe_full_ai720.mp4")
+            _full_1080 = _test_src.with_name("_pipe_full_1080.mp4")
+            _full_slow = _test_src.with_name("_pipe_full_slow.mp4")
+            _full_ok = True
+            # Step 1: AI 720p
+            try:
+                import ai_upscale as _aup
+                _t0 = time.time()
+                _aup.upscale_video_ai(str(_test_src), output_video=str(_full_ai), target_height=720, log=log)
+                _t = time.time() - _t0
+                if _full_ai.is_file():
+                    log(f"  ✓ waifu2x→720p: {_t:.0f}วินาที")
+                else:
+                    log("  ✗ waifu2x→720p ล้มเหลว"); _full_ok = False
+            except Exception as _e:
+                log(f"  ✗ waifu2x→720p: {_e}"); _full_ok = False
+            # Step 2: FFmpeg 1080p (ใช้ผลจาก AI ถ้ามี, ถ้าไม่ใช้ต้นฉบับ)
+            _full_src = _full_ai if _full_ai.is_file() else _test_src
+            _t0 = time.time()
+            _r = _run([ffmpeg, "-y", "-i", str(_full_src),
+                       "-vf", "scale=-2:1080:flags=lanczos",
+                       "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                       str(_full_1080)], timeout=120)
+            _t = time.time() - _t0
+            if _r.returncode == 0 and _full_1080.is_file():
+                log(f"  ✓ FF→1080p: {_t:.0f}วินาที")
+            else:
+                log(f"  ✗ FF→1080p ล้มเหลว: {(_r.stderr or "")[-300:]}"); _full_ok = False
+            # Step 3: Slow 2x (ใช้ 1080p ถ้ามี, ถ้าไม่ใช้ต้นฉบับ)
+            _full_src2 = _full_1080 if _full_1080.is_file() else _test_src
+            try:
+                import ai_slow2x as _as2x
+                _t0 = time.time()
+                _as2x.make_ai_slow2x(str(_full_src2), output_video=str(_full_slow), factor=2, log=log)
+                _t = time.time() - _t0
+                if _full_slow.is_file():
+                    log(f"  ✓ Slow2x: {_t:.0f}วินาที")
+                else:
+                    log("  ✗ Slow2x ล้มเหลว"); _full_ok = False
+            except Exception as _e:
+                log(f"  ✗ Slow2x: {_e}"); _full_ok = False
+            if _full_ok:
+                log("✓ Full Pipeline สำเร็จ")
+            else:
+                log("✗ Full Pipeline มีปัญหา")
+            for _f in (_full_ai, _full_1080, _full_slow):
+                _f.unlink(missing_ok=True)
+        log("=== จบทดสอบ Pipeline ===")
+        # cleanup 480p temp
+        for _f in (_test_480p,):
+            try: _f.unlink(missing_ok=True)
+            except: pass
+    except Exception as _pe:
+        log(f"⚠ ทดสอบ Pipeline มีปัญหา: {_pe}")
+    # Warn about optional files but don't fail
+    _optional = (
+        root / "snapgen_modules" / "snapgen_page_prop.py",
+        root / "snapgen_modules" / "snapgen_page_ref.py",
+        root / "snapgen_modules" / "snapgen_page_story_face.py",
+        root / "snapgen_modules" / "snapgen_page_karaoke.py",
+        root / "snapgen_modules" / "ai_slow2x.py",
+        root / "snapgen_modules" / "ai_upscale.py",
+        root / "snapgen_modules" / "snapgen_updater.py",
+        root / "assets" / "tidmun_studio_icon_final.ico",
+    )
+    _missing_optional = [str(p) for p in _optional if not p.is_file()]
+    if _missing_optional:
+        log("⚠ ไฟล์เพิ่มเติมขาด (อาจต้องอัปเดตก่อน): " + ", ".join(_missing_optional))
 
     summary = {"ok": not failures, "repaired": repaired, "failures": failures,
                "project_root": str(root), "bridge_dir": str(bridge)}

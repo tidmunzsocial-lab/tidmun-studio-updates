@@ -471,7 +471,7 @@ class Hunyuan3DClient:
     def _download_file(self, url: str, dest: Path):
         """Download a file via curl."""
         cmd = ["curl", "-s", "-L", "-o", str(dest), url, "--max-time", "300"]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=310)
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=310)
         if r.returncode != 0 or not dest.exists():
             raise Hunyuan3DError(f"Download failed: {url[:100]}")
 
