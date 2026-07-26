@@ -316,16 +316,15 @@ for _base in [
 # ---------------------------------------------------------------------------
 # DEVELOPER NOTE — DO NOT GUESS OR CHANGE THIS ARCHITECTURE SILENTLY
 #
-# The intended production setup is ONE central SnapGen host computer:
-#   team SnapGen clients -> Tailscale -> central Bridge -> central GPT account
+# Every team computer runs its OWN SnapGen app and its OWN local Bridge:
+#   local SnapGen -> local Bridge (127.0.0.1) -> the same shared GPT account
 #
-# The Bridge process listens on 127.0.0.1 for safety. Tailscale Serve exposes
-# that local port privately to approved team devices. Client machines must be
-# able to select the central machine's Tailscale/MagicDNS address and must not
-# be forced to start their own Bridge.
+# The computers also sign in to the same Tailscale account/tailnet, but
+# Tailscale is NOT used to forward all GPT requests to one central Bridge.
+# There is no central SnapGen host. Each machine performs its own work.
 #
-# 127.0.0.1 here does NOT mean the final product is permanently local-only.
-# It means Tailscale is the controlled entry point to the shared Bridge.
+# Keeping the Bridge on 127.0.0.1 is intentional: other computers must not
+# connect directly to this machine's Bridge.
 # See docs/BRIDGE_TEAM_ARCHITECTURE.md before changing Bridge networking.
 # ---------------------------------------------------------------------------
 BRIDGE_HOST = "127.0.0.1"
