@@ -89,10 +89,14 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     choose_btn.pack(side="left", padx=(0, 8))
     # Resolve callbacks when the user clicks. Their implementations are
     # defined later in install(), after all page state has been created.
-    attach_btn = _btn(ref_row, "📎 แนบรูป", CYAN, lambda: _attach_refs(), padx=8)
+    # SCENE CONTINUITY CONTRACT:
+    # This button selects an image from the previous event/shot. It is not a
+    # shortcut for "latest file" and it is not a character-reference picker.
+    # The selected image must be sent on every manual generation together with
+    # any matched character/location refs, so separate GPT requests preserve
+    # the ongoing location, wardrobe, props, lighting, and scene state.
+    attach_btn = _btn(ref_row, "📎 ต่อจากฉากก่อน", CYAN, lambda: _attach_refs(), padx=8)
     attach_btn.pack(side="left", padx=(0, 4))
-    latest_btn = _btn(ref_row, "📌 ล่าสุด", PINK, lambda: _attach_latest_img(), padx=8)
-    latest_btn.pack(side="left", padx=(0, 4))
     ref_label.pack(side="left")
     tk.Label(ref_row, textvariable=ref_names_var, fg="#1565C0", bg=BG, anchor="w",
              font=("Leelawadee UI", 9)).pack(side="left", fill="x", expand=True, padx=(8, 0))
@@ -199,27 +203,6 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         for old_ref in manual_refs:
             remove_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(old_ref))[0])
         manual_refs.clear(); _save_ref_state(); _log("ล้างรูปแนบแล้ว"); _update_ref_highlight()
-
-    def _attach_latest_img():
-        try:
-            d = export_image_dir or g.get("EXPORT_IMAGE")
-            if not d or not os.path.isdir(str(d)):
-                _log("ยังไม่มีรูปที่สร้าง"); return
-            all_files = sorted(
-                [os.path.join(str(d), f) for f in os.listdir(str(d)) if f.lower().endswith((".png",".jpg",".jpeg",".webp"))],
-                key=os.path.getmtime, reverse=True
-            )
-            for f in all_files:
-                if f not in manual_refs:
-                    manual_refs.append(f)
-                    set_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(f))[0], append=True)
-                    _save_ref_state()
-                    _log(f"แนบ {os.path.basename(f)}")
-                    _update_ref_highlight(log=True)
-                    return
-            _log("แนบรูปครบทุกภาพแล้ว")
-        except Exception as exc:
-            _log(f"ผิดพลาด: {exc}")
 
     def _log(msg):
         append_log(log_box, msg)
@@ -705,14 +688,33 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
             try:
                 do_req = g.get("_do_image_request")
                 if not do_req: raise RuntimeError("_do_image_request missing")
-                payload = {"prompt": prompt, "aspect_ratio": img_aspect_var.get()}
-                ref_paths = [p for _name, p in matched_refs]
-                if not ref_paths and manual_refs:
-                    ref_paths = list(manual_refs)
+                request_prompt = prompt
+                ref_paths = []
+                # A previous-scene image controls event continuity. Always send
+                # it first, even when the prompt also matched enough refs to
+                # reach the ten-image API limit.
+                for previous_scene_path in manual_refs:
+                    if previous_scene_path and previous_scene_path not in ref_paths:
+                        ref_paths.append(previous_scene_path)
+                for _ref_name, matched_path in matched_refs:
+                    if matched_path and matched_path not in ref_paths:
+                        ref_paths.append(matched_path)
+                if manual_refs:
+                    request_prompt = (
+                        prompt.rstrip()
+                        + "\n\nCONTINUITY FROM PREVIOUS SCENE: Treat the attached previous-scene image "
+                          "as the authoritative state immediately before this event. Keep the same "
+                          "location, character identity, wardrobe, props, time of day, lighting, and "
+                          "spatial continuity unless this prompt explicitly says that one of them "
+                          "changes. Continue the event naturally; change only the action, expression, "
+                          "composition, or camera view requested here. Do not relocate the scene or "
+                          "redesign anything without an explicit instruction."
+                    )
+                payload = {"prompt": request_prompt, "aspect_ratio": img_aspect_var.get()}
                 if ref_paths:
                     enc = g.get("_encode_image_b64")
                     if enc: payload["images"] = [enc(p) for p in ref_paths[:10]]
-                out = do_req(payload, is_edit=bool(payload.get("images")), prompt=prompt, name_hint=name_hint or prompt, raw_prompt=prompt, prompt_index=prompt_index, output_dir=str(export_image_dir) if export_image_dir else None)
+                out = do_req(payload, is_edit=bool(payload.get("images")), prompt=request_prompt, name_hint=name_hint or prompt, raw_prompt=prompt, prompt_index=prompt_index, output_dir=str(export_image_dir) if export_image_dir else None)
                 root.after(0, lambda p=out: (_gallery_add(p), _log("สร้างรูปเสร็จ"), _notify_done()))
             except Exception as e:
                 root.after(0, lambda m=str(e): _log("❌ " + m))
@@ -898,7 +900,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
 
     def _attach_refs():
         from tkinter import filedialog
-        files = filedialog.askopenfilenames(title="แนบรูป", filetypes=[("Images", "*.png *.jpg *.jpeg *.webp")])
+        files = filedialog.askopenfilenames(title="เลือกภาพฉากก่อนหน้า", filetypes=[("Images", "*.png *.jpg *.jpeg *.webp")])
         if not files:
             return
         for old in manual_refs:
@@ -907,7 +909,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         for path in manual_refs:
             set_selection_lock(lock_g, "reference", os.path.splitext(os.path.basename(path))[0], append=True)
         _save_ref_state()
-        _log(f"ล็อกไฟล์แนบแล้ว {len(manual_refs)} รูป")
+        _log(f"ใช้ภาพฉากก่อนหน้า {len(manual_refs)} รูป — ภาพถัดไปจะรักษาเหตุการณ์ให้ต่อเนื่อง")
         _update_ref_highlight(log=True)
 
     def _clear_refs():
