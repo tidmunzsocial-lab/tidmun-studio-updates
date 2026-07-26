@@ -353,7 +353,7 @@ def _start_bridge(bridge_dir: Path, bridge_python: Path, log, host=MAIN_BRIDGE_H
     env["CHATGPT_ACCOUNTS_DIR"] = "./secrets/accounts"
     env["CHATGPT_ACCOUNT_STRATEGY"] = "sticky"
     command = [
-        bridge_python, "-m", "chatgpt_api", "serve", "--host", host,
+        bridge_python, "-m", "chatgpt_api", "serve", "--host", "0.0.0.0",
         "--port", "8000", "--api-key", "local-dev-key",
         "--account-strategy", "sticky", "--normal-chat",
     ]

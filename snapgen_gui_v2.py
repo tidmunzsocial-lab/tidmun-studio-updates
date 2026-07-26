@@ -323,8 +323,17 @@ for _base in [
 # Tailscale is NOT used to forward all GPT requests to one central Bridge.
 # There is no central SnapGen host. Each machine performs its own work.
 #
-# Keeping the Bridge on 127.0.0.1 is intentional: other computers must not
-# connect directly to this machine's Bridge.
+# IMPORTANT: BRIDGE_HOST/BRIDGE_SERVER below are the addresses SnapGen uses
+# to contact its own Bridge, so they remain 127.0.0.1.  The Bridge PROCESS
+# intentionally starts with --host 0.0.0.0 in the original design. Do not
+# replace that bind address with 127.0.0.1 as an assumed "security fix".
+#
+# Preserve these separate roles:
+#   client connection address = 127.0.0.1
+#   Bridge process bind address = 0.0.0.0
+#
+# Do not change Bridge binding, shared GPT-account behavior, Tailscale
+# behavior, or account strategy without explicit instructions from the owner.
 # See docs/BRIDGE_TEAM_ARCHITECTURE.md before changing Bridge networking.
 # ---------------------------------------------------------------------------
 BRIDGE_HOST = "127.0.0.1"
@@ -518,7 +527,7 @@ def _bridge_startup_sync():
 
     _startup_cmd = [
             str(BRIDGE_PYTHON), "-m", "chatgpt_api", "serve",
-            "--host", BRIDGE_HOST, "--port", str(BRIDGE_PORT),
+            "--host", "0.0.0.0", "--port", str(BRIDGE_PORT),
             "--api-key", BRIDGE_API_KEY,
             "--account-strategy", "sticky",
             "--web-timeout", "120",
@@ -7871,7 +7880,7 @@ def _install_better_bridge_manager():
             "port=8000\n"
             "if openp(port): sys.exit(0)\n"
             "env=load_env()\n"
-            "subprocess.Popen([str(PY),'-m','chatgpt_api','serve','--host','127.0.0.1','--port',str(port),'--api-key','local-dev-key'], cwd=str(BASE), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n",
+            "subprocess.Popen([str(PY),'-m','chatgpt_api','serve','--host','0.0.0.0','--port',str(port),'--api-key','local-dev-key'], cwd=str(BASE), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n",
             encoding="utf-8"
         )
         startup = Path(os.environ.get("APPDATA", str(Path.home()/"AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs/Startup"
@@ -7961,7 +7970,7 @@ def _install_better_bridge_manager():
         env["CHATGPT_RESEARCH_CONCURRENCY"] = "free=1,go=1,plus=1,pro=1"
         cmd = [
             str(BRIDGE_DIR/".venv"/"Scripts"/"python.exe"), "-m", "chatgpt_api", "serve",
-            "--host", BRIDGE_SERVER, "--port", str(port), "--api-key", API_KEY,
+            "--host", "0.0.0.0", "--port", str(port), "--api-key", API_KEY,
             "--account-strategy", "sticky", "--web-timeout", "120",
             "--chat-concurrency", "free=1,go=1,plus=1,pro=1",
             "--upload-concurrency", "free=1,go=1,plus=1,pro=1",
