@@ -275,37 +275,46 @@ def _apply(staging, project_root, parent_pid):
 
     plan = json.loads((staging / "apply.json").read_text(encoding="utf-8"))
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup = project_root / "snapgen_backups" / f"update_before_{plan['version']}_{stamp}"
-    backup.mkdir(parents=True, exist_ok=True)
     changed = []
+    # Keep rollback files only while an update is being installed. Version
+    # restore is handled by GitHub, so successful updates must not leave
+    # permanent local backup folders behind.
     try:
-        for item in plan["files"]:
-            rel = _safe_relative(item["path"])
-            src = staging / "files" / Path(*PurePosixPath(rel).parts)
-            dst = project_root / Path(*PurePosixPath(rel).parts)
-            old = backup / Path(*PurePosixPath(rel).parts)
-            if dst.exists():
-                old.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(dst, old)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            temp_dst = dst.with_name(dst.name + ".updating")
-            shutil.copy2(src, temp_dst)
-            os.replace(temp_dst, dst)
-            changed.append((dst, old))
-        (project_root / "snapgen_update_last.json").write_text(
-            json.dumps({"version": plan["version"], "backup": str(backup), "updated_at": stamp}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except Exception:
-        for dst, old in reversed(changed):
+        with tempfile.TemporaryDirectory(prefix="snapgen_update_rollback_") as rollback_name:
+            rollback = Path(rollback_name)
             try:
-                if old.exists():
-                    shutil.copy2(old, dst)
-                elif dst.exists():
-                    dst.unlink()
+                for item in plan["files"]:
+                    rel = _safe_relative(item["path"])
+                    src = staging / "files" / Path(*PurePosixPath(rel).parts)
+                    dst = project_root / Path(*PurePosixPath(rel).parts)
+                    old = rollback / Path(*PurePosixPath(rel).parts)
+                    existed = dst.exists()
+                    if existed:
+                        old.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(dst, old)
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    temp_dst = dst.with_name(dst.name + ".updating")
+                    shutil.copy2(src, temp_dst)
+                    os.replace(temp_dst, dst)
+                    changed.append((dst, old, existed))
+                (project_root / "snapgen_update_last.json").write_text(
+                    json.dumps(
+                        {"version": plan["version"], "updated_at": stamp},
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
             except Exception:
-                pass
-        raise
+                for dst, old, existed in reversed(changed):
+                    try:
+                        if existed and old.exists():
+                            shutil.copy2(old, dst)
+                        elif not existed and dst.exists():
+                            dst.unlink()
+                    except Exception:
+                        pass
+                raise
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 
@@ -331,4 +340,3 @@ if __name__ == "__main__" and len(sys.argv) >= 5 and sys.argv[1] == "--apply":
         error_file = Path(sys.argv[3]) / "snapgen_update_error.txt"
         error_file.write_text(str(exc), encoding="utf-8")
         raise
-

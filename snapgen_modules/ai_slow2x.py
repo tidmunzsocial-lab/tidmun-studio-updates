@@ -120,9 +120,10 @@ def ensure_rife_tool(log=None):
     """Download and atomically install the complete RIFE package."""
     say = log if callable(log) else (lambda _msg: None)
     project_root = Path(__file__).resolve().parent.parent
+    # Runtime tools have one canonical home. Keeping a fallback copy beside
+    # this module previously duplicated the complete ~470 MB RIFE package.
     candidate_dirs = [
         project_root / "snapgen_data" / "tools" / "rife-ncnn-vulkan",
-        Path(__file__).resolve().parent / "rife-ncnn-vulkan",
     ]
     for folder in candidate_dirs:
         if _rife_install_complete(folder):

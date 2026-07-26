@@ -109,7 +109,7 @@ def _migrate_root_layout():
             shutil.move(str(src), str(dst))
         except Exception:
             pass
-    for name in (".venv312", "__pycache__", "docs", "tools", "vendor", "snapgen_backups"):
+    for name in (".venv312", "__pycache__", "docs", "tools", "vendor"):
         path = BASE_ROOT / name
         if not path.exists():
             continue
@@ -504,7 +504,7 @@ def _bridge_startup_sync():
 
     _startup_cmd = [
             str(BRIDGE_PYTHON), "-m", "chatgpt_api", "serve",
-            "--host", "0.0.0.0", "--port", str(BRIDGE_PORT),
+            "--host", BRIDGE_HOST, "--port", str(BRIDGE_PORT),
             "--api-key", BRIDGE_API_KEY,
             "--account-strategy", "sticky",
             "--web-timeout", "120",
@@ -553,18 +553,11 @@ pyc = BASE_ROOT / "__pycache__" / "snapgen_core.cpython-312.pyc"
 if not pyc.is_file():
     # Backward-compatible fallback for older installations during update.
     pyc = BASE_ROOT / "__pycache__" / "snapgen_gui_v2.cpython-312.pyc"
-# Auto-restore critical .pyc if __pycache__ was wiped
 if not pyc.is_file():
-    for _backup in [BASE_ROOT / "temp_restore" / "snapgen_core.cpython-312.pyc",
-                    BASE_ROOT / "temp_restore" / "__pycache__" / "snapgen_core.cpython-312.pyc"]:
-        if _backup.is_file():
-            pyc.parent.mkdir(parents=True, exist_ok=True)
-            import shutil as _sh
-            _sh.copy2(str(_backup), str(pyc))
-            print(f"[SnapGen] Restored core bytecode from {_backup.name}")
-            break
-if not pyc.is_file():
-    raise RuntimeError("ไม่พบไฟล์หลัก snapgen_core.cpython-312.pyc — ต้องคัดลอกทั้งโฟลเดอร์ Project")
+    raise RuntimeError(
+        "ไม่พบไฟล์หลัก snapgen_core.cpython-312.pyc — "
+        "ให้ Restore โปรแกรมจาก GitHub แล้วเปิด setup_and_run.bat"
+    )
 with open(pyc, "rb") as f:
     code = marshal.loads(f.read()[16:])
 
@@ -707,6 +700,53 @@ root = g.get("root") or tk._default_root
 APP_TITLE = "ติดมันส์ สตูดิโอ"
 APP_LOGO_ICO = BASE_ROOT / "assets" / "tidmun_studio_icon_final.ico"
 _app_logo_photo = None
+
+def _write_unhandled_error(kind, exc_type, exc_value, exc_traceback):
+    """Persist unexpected UI/thread failures instead of losing them silently."""
+    import traceback
+    try:
+        log_dir = BASE_ROOT / "snapgen_data" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        rendered = "".join(
+            traceback.format_exception(exc_type, exc_value, exc_traceback)
+        )
+        with (log_dir / "unhandled_errors.log").open(
+            "a", encoding="utf-8", errors="replace"
+        ) as stream:
+            stream.write(
+                f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {kind}\n{rendered}"
+            )
+    except Exception:
+        traceback.print_exception(exc_type, exc_value, exc_traceback)
+
+
+def _report_gui_exception(exc_type, exc_value, exc_traceback):
+    _write_unhandled_error("GUI callback", exc_type, exc_value, exc_traceback)
+    try:
+        messagebox.showerror(
+            APP_TITLE,
+            "เกิดข้อผิดพลาดที่หน้าจอ\n\n"
+            f"{exc_value}\n\n"
+            "บันทึกรายละเอียดไว้ที่ snapgen_data/logs/unhandled_errors.log",
+            parent=root,
+        )
+    except Exception:
+        pass
+
+
+if root is not None:
+    root.report_callback_exception = _report_gui_exception
+
+if hasattr(threading, "excepthook"):
+    def _report_thread_exception(args):
+        _write_unhandled_error(
+            f"background task: {getattr(args.thread, 'name', 'unknown')}",
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+        )
+    threading.excepthook = _report_thread_exception
+
 
 def _apply_tidmun_branding():
     """Apply app name and .ico icon to title bar, taskbar, and Alt-Tab."""
@@ -2366,7 +2406,7 @@ def _wrap_open_settings():
                         for child in list(w.winfo_children()):
                             _destroy_tool_btns(child)
                         _remove_openrouter_settings(w)
-                        _add_clean_backup_button(w)
+                        _add_settings_maintenance_buttons(w)
                         _rewire_snapgen_api_test_button(w)
                         w.after(30, _rewire_open_settings_windows)
                         w.after(150, _rewire_open_settings_windows)
@@ -2468,121 +2508,6 @@ def _rewire_open_settings_windows():
                     _rewire_snapgen_api_test_button(w)
     except Exception:
         pass
-
-def _make_clean_backup():
-    """Create clean backup zip: app code/config/pyc only; no exports/media/old zips."""
-    import zipfile, time
-    # Archive from the project root: the launcher and preserved .pyc live
-    # here, while settings and prompt data are in snapgen_data/.
-    base = BASE_ROOT
-    # Keep every backup in one folder at the project root.  Older versions
-    # wrote to BASE (snapgen_data), while legacy backups live beside the app.
-    out_dir = BASE_ROOT / "snapgen_backups"
-    out_dir.mkdir(exist_ok=True)
-    out = out_dir / f"snapgen_clean_backup_{time.strftime('%Y%m%d-%H%M%S')}.zip"
-    exclude_dirs = {
-        "snapgen_backups", "trash-agent", ".git", "release", ".venv311", ".venv312",
-        "tkinterdnd2", "tools", "vendor", "docs", "runtime", "outputs", "output", "export", "exports",
-        "generated", "generations", "downloads", "ai_images", "hunyuan_output",
-        "prop_3d", "logs", "__pycache__",
-    }
-    exclude_ext = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm", ".glb", ".obj", ".mtl", ".fbx", ".zip"}
-    keep = {"__pycache__/snapgen_gui_v2.cpython-312.pyc"}
-    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in base.rglob("*"):
-            if not p.is_file():
-                continue
-            rel = p.relative_to(base).as_posix()
-            if rel not in keep and set(rel.split("/")[:-1]) & exclude_dirs:
-                continue
-            if rel not in keep and p.suffix.lower() in exclude_ext:
-                continue
-            z.write(p, rel)
-    with zipfile.ZipFile(out) as z:
-        names = z.namelist()
-        if "snapgen_gui_v2.py" not in names or "__pycache__/snapgen_gui_v2.cpython-312.pyc" not in names:
-            raise RuntimeError("backup ไม่ครบ: missing snapgen_gui_v2.py or pyc")
-
-    # Retention: only remove old backups after the new archive has passed
-    # verification, so a failed backup never removes the last good copies.
-    backups = sorted(
-        out_dir.glob("snapgen_clean_backup_*.zip"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    for old_backup in backups[2:]:
-        old_backup.unlink()
-    return out
-
-def _restore_clean_backup(archive_path):
-    """Validate and restore a SnapGen clean-backup ZIP into this project."""
-    import tempfile
-    import zipfile
-
-    archive = Path(archive_path).expanduser().resolve()
-    if not archive.is_file():
-        raise RuntimeError(f"ไม่พบไฟล์แบ็กอัป: {archive}")
-
-    project_root = BASE_ROOT.resolve()
-    required = {
-        "snapgen_gui_v2.py",
-        "__pycache__/snapgen_gui_v2.cpython-312.pyc",
-    }
-    skip_roots = {
-        ".git", "release", "snapgen_backups", ".venv311", ".venv312",
-        "export", "exports", "tools", "vendor", "docs", "runtime", "tkinterdnd2",
-    }
-    with tempfile.TemporaryDirectory(prefix="snapgen_restore_") as temp_name:
-        stage = Path(temp_name).resolve()
-        try:
-            with zipfile.ZipFile(archive, "r") as z:
-                bad_member = z.testzip()
-                if bad_member:
-                    raise RuntimeError(f"ไฟล์ ZIP เสียตรงรายการ: {bad_member}")
-                names = {name.replace("\\", "/").lstrip("./") for name in z.namelist()}
-                missing = sorted(required - names)
-                if missing:
-                    raise RuntimeError("ไม่ใช่ Backup ของโปรแกรมที่สมบูรณ์ — ขาด " + ", ".join(missing))
-                for info in z.infolist():
-                    raw_name = info.filename.replace("\\", "/")
-                    parts = [part for part in raw_name.split("/") if part not in {"", "."}]
-                    if (
-                        not parts
-                        or raw_name.startswith("/")
-                        or any(part == ".." for part in parts)
-                        or ":" in parts[0]
-                     ):
-                        raise RuntimeError(f"พบตำแหน่งไฟล์ไม่ปลอดภัยใน ZIP: {info.filename}")
-                    target = (stage.joinpath(*parts)).resolve()
-                    if target != stage and stage not in target.parents:
-                        raise RuntimeError(f"พบตำแหน่งไฟล์ออกนอก ZIP: {info.filename}")
-                    # Older backups accidentally included Git history and
-                    # release packages.  Never restore those machine-specific
-                    # or generated folders over the current installation.
-                    if parts[0] not in skip_roots:
-                        z.extract(info, stage)
-        except zipfile.BadZipFile as exc:
-            raise RuntimeError("ไฟล์ที่เลือกไม่ใช่ ZIP Backup ที่อ่านได้") from exc
-
-        # Preserve the current working state before replacing anything.  The
-        # selected archive is already extracted, so retention cannot remove it
-        # from underneath this restore operation.
-        safety_backup = _make_clean_backup()
-        restored = 0
-        for source in stage.rglob("*"):
-            if not source.is_file():
-                continue
-            relative = source.relative_to(stage)
-            destination = (project_root / relative).resolve()
-            if destination != project_root and project_root not in destination.parents:
-                raise RuntimeError(f"ปลายทาง Restore ไม่ปลอดภัย: {relative}")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
-            restored += 1
-
-    if restored == 0:
-        raise RuntimeError("Backup ไม่มีไฟล์ให้ Restore")
-    return restored, safety_backup
 
 def _count_export_items():
     """Return file/folder counts inside export without counting export itself."""
@@ -3018,11 +2943,8 @@ def _open_publish_update_window(settings_win, settings_status=None):
     refresh_github_auth()
     win.protocol("WM_DELETE_WINDOW", close)
 
-def _add_clean_backup_button(settings_win):
-    """Add portable Repair/Restore/Clear Export buttons; avoid duplicates.
-
-    Restore now installs a selected GitHub release version. Local Backup UI is removed.
-    """
+def _add_settings_maintenance_buttons(settings_win):
+    """Add Repair/GitHub Restore/Clear Export buttons; avoid duplicates."""
     try:
         seen_repair = False
         seen_restore = False
@@ -7935,7 +7857,7 @@ def _install_better_bridge_manager():
             "port=8000\n"
             "if openp(port): sys.exit(0)\n"
             "env=load_env()\n"
-            "subprocess.Popen([str(PY),'-m','chatgpt_api','serve','--host','0.0.0.0','--port',str(port),'--api-key','local-dev-key'], cwd=str(BASE), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n",
+            "subprocess.Popen([str(PY),'-m','chatgpt_api','serve','--host','127.0.0.1','--port',str(port),'--api-key','local-dev-key'], cwd=str(BASE), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n",
             encoding="utf-8"
         )
         startup = Path(os.environ.get("APPDATA", str(Path.home()/"AppData/Roaming"))) / "Microsoft/Windows/Start Menu/Programs/Startup"
@@ -8025,7 +7947,7 @@ def _install_better_bridge_manager():
         env["CHATGPT_RESEARCH_CONCURRENCY"] = "free=1,go=1,plus=1,pro=1"
         cmd = [
             str(BRIDGE_DIR/".venv"/"Scripts"/"python.exe"), "-m", "chatgpt_api", "serve",
-            "--host", "0.0.0.0", "--port", str(port), "--api-key", API_KEY,
+            "--host", BRIDGE_SERVER, "--port", str(port), "--api-key", API_KEY,
             "--account-strategy", "sticky", "--web-timeout", "120",
             "--chat-concurrency", "free=1,go=1,plus=1,pro=1",
             "--upload-concurrency", "free=1,go=1,plus=1,pro=1",
