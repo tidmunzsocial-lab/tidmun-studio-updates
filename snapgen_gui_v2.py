@@ -339,6 +339,13 @@ for _base in [
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 8000
 BRIDGE_API_KEY = "local-dev-key"
+SNAPGEN_VERBOSE_STARTUP = os.environ.get("SNAPGEN_VERBOSE_STARTUP") == "1"
+
+
+def _snapgen_startup_detail(message):
+    """Show routine startup detail only when explicitly requested."""
+    if SNAPGEN_VERBOSE_STARTUP:
+        print(message)
 def _find_bridge_dir():
     """Prefer a portable bridge location on each Windows user account."""
     candidates = []
@@ -458,7 +465,7 @@ def _bridge_cleanup():
             conn.execute("DELETE FROM artifacts")
             conn.commit()
             conn.close()
-            print("[SnapGen] Bridge cache cleared (artifacts table)")
+            _snapgen_startup_detail("[SnapGen] Bridge cache cleared (artifacts table)")
         except Exception as e:
             print(f"[SnapGen] Could not clear artifacts: {e}")
 
@@ -467,7 +474,7 @@ def _bridge_cleanup():
             for f in img_dir.iterdir():
                 if f.is_file():
                     f.unlink()
-            print("[SnapGen] Temp images cleared")
+            _snapgen_startup_detail("[SnapGen] Temp images cleared")
         except Exception as e:
             print(f"[SnapGen] Could not clear temp images: {e}")
 
@@ -497,9 +504,9 @@ def _bridge_health():
 def _bridge_startup_sync():
     """Start this workstation's private local Bridge."""
     if _bridge_health():
-        print(f"[SnapGen] Local Bridge ready at {BRIDGE_HOST}:{BRIDGE_PORT} ✓")
+        print("[SnapGen] Bridge ready ✓")
         return
-    print("[SnapGen] Cleaning bridge state...")
+    _snapgen_startup_detail("[SnapGen] Cleaning bridge state...")
     try:
         out = subprocess.check_output(
             f'netstat -ano | findstr ":{BRIDGE_PORT}"',
@@ -512,7 +519,7 @@ def _bridge_startup_sync():
                 try:
                     subprocess.run(["taskkill", "/F", "/PID", pid],
                                    capture_output=True, timeout=5)
-                    print(f"[SnapGen] Killed stale PID {pid} on port {BRIDGE_PORT}")
+                    _snapgen_startup_detail(f"[SnapGen] Killed stale PID {pid} on port {BRIDGE_PORT}")
                 except Exception:
                     pass
     except Exception:
@@ -520,7 +527,7 @@ def _bridge_startup_sync():
 
     _bridge_cleanup()
 
-    print("[SnapGen] Starting bridge...")
+    _snapgen_startup_detail("[SnapGen] Starting bridge...")
     if not BRIDGE_PYTHON.exists():
         print(f"[SnapGen] ERROR: Bridge python not found at {BRIDGE_PYTHON}")
         return
@@ -722,7 +729,7 @@ try:
                 _snapgen_after(0, release)
         threading.Thread(target=worker, daemon=True).start()
     g["generate_ai_image_for_slot"] = _new_generate_ai_image_for_slot
-    print("[SnapGen] snapgen_image_gen wired ✓")
+    _snapgen_startup_detail("[SnapGen] snapgen_image_gen wired ✓")
 except Exception as _e:
     print(f"[SnapGen] snapgen_image_gen wire failed: {_e}")
     import traceback; traceback.print_exc()
@@ -1416,7 +1423,7 @@ try:
         # once after slow completes. Running it twice doubles processing time.
         return _slow_result
     g["make_ai_slow2x"] = _snapgen_make_ai_slow2x
-    print("[SnapGen] ai_slow2x patched ✓")
+    _snapgen_startup_detail("[SnapGen] ai_slow2x patched ✓")
 except Exception as _e:
     print(f"[SnapGen] ai_slow2x patch failed: {_e}")
 
@@ -1910,7 +1917,7 @@ try:
         root.after(1500, _rewire_open_folder_buttons)
     except Exception:
         pass
-    print("[SnapGen] export/video download folder patched ✓")
+    _snapgen_startup_detail("[SnapGen] export/video download folder patched ✓")
 except Exception as _e:
     print(f"[SnapGen] export/video patch failed: {_e}")
 
@@ -6530,7 +6537,7 @@ def _rewire_prompt_buttons(w):
                     _count += 1
                 except Exception:
                     pass
-            print(f"[SnapGen] voice mic buttons installed: {_count} slots ✓")
+            _snapgen_startup_detail(f"[SnapGen] voice mic buttons installed: {_count} slots ✓")
             # Image AI page
             _img_prompt = g.get("img_prompt_text")
             _img_frame = g.get("img_prompt_frame")
@@ -6543,7 +6550,7 @@ def _rewire_prompt_buttons(w):
             except Exception:
                 pass
             create_mic_icon_button(_img_frame, _img_prompt, root, size=28, log_fn=_img_log_fn)
-            print("[SnapGen] voice mic button installed (Image AI) ✓")
+            _snapgen_startup_detail("[SnapGen] voice mic button installed (Image AI) ✓")
         except Exception as _ve:
             print(f"[SnapGen] voice mic buttons failed: {_ve}")
 
@@ -8907,7 +8914,7 @@ def _install_account_capture_manager():
 
     g["manage_account_capture_hub"] = manage_account_capture_hub
     g["image_provider"] = "GPT"
-    print("[SnapGen] GPT account capture installed ✓")
+    _snapgen_startup_detail("[SnapGen] GPT account capture installed ✓")
 
 try:
     _install_account_capture_manager()
@@ -10482,7 +10489,7 @@ if root:
     try:
         import snapgen_page_video as _spv
         _spv.install(g, root)
-        print("[SnapGen] snapgen_page_video adapter installed ✓")
+        _snapgen_startup_detail("[SnapGen] snapgen_page_video adapter installed ✓")
     except Exception as _e:
         print(f"[SnapGen] snapgen_page_video install failed: {_e}")
         import traceback; traceback.print_exc()
@@ -10582,7 +10589,7 @@ if root:
         _scan(root)
         pass  # AI file-match button removed from Image page
 
-        print("[SnapGen] snapgen_page_image copied UI installed ✓")
+        _snapgen_startup_detail("[SnapGen] snapgen_page_image copied UI installed ✓")
         # Re-apply export folder from config after recovered save/load APIs exist.
         try:
             cfg = g.get("load_config", lambda: {})() or {}
@@ -10593,7 +10600,7 @@ if root:
             g["EXPORT_IMAGE"] = EXPORT_IMAGE
             g["EXPORT_VIDEO"] = EXPORT_VIDEO
             g["set_export_root"] = lambda path, save=True: _apply_export_root(path, save=save)
-            print(f"[SnapGen] export root ready: {EXPORT_ROOT}")
+            _snapgen_startup_detail(f"[SnapGen] export root ready: {EXPORT_ROOT}")
         except Exception as _export_e:
             print(f"[SnapGen] export root reapplied failed: {_export_e}")
 
@@ -10607,7 +10614,7 @@ if root:
         _apply_white_theme(root)
         root.after(300, lambda: _apply_white_theme(root))
         root.after(1000, lambda: _apply_white_theme(root))
-        print("[SnapGen] white minimal surface theme installed ✓")
+        _snapgen_startup_detail("[SnapGen] white minimal surface theme installed ✓")
     except Exception as _e:
         print(f"[SnapGen] white theme failed: {_e}")
 
@@ -10806,17 +10813,18 @@ if root:
             root,
             BASE_ROOT / "assets" / "video_forbidden_words.json",
         )
-        print(f"[SnapGen] video forbidden-word guard installed: {_guard_count} slot(s) ✓")
+        _snapgen_startup_detail(f"[SnapGen] video forbidden-word guard installed: {_guard_count} slot(s) ✓")
         # Add editor button for forbidden words
         try:
             from snapgen_forbidden_words_editor import install_button as _install_forbidden_btn
             _install_forbidden_btn(root, g, BASE_ROOT / "assets" / "video_forbidden_words.json")
-            print("[SnapGen] forbidden-words editor button installed ✓")
+            _snapgen_startup_detail("[SnapGen] forbidden-words editor button installed ✓")
         except Exception as _editor_err:
             print(f"[SnapGen] forbidden-words editor button failed: {_editor_err}")
     except Exception as _guard_error:
         print(f"[SnapGen] video forbidden-word guard failed: {_guard_error}")
 
+    print("[SnapGen] Ready ✓")
     root.mainloop()
 
 

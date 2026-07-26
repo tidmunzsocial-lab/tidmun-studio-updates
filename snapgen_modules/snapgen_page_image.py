@@ -87,9 +87,11 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     ref_label = tk.Label(ref_row, text="ไม่มีโฟลเดอร์อ้างอิง", fg="#555", bg=BG, anchor="w")
     choose_btn = _btn(ref_row, "📂 เลือกโฟลเดอร์อ้างอิง", ORANGE, g.get("browse_ref_folder"))
     choose_btn.pack(side="left", padx=(0, 8))
-    attach_btn = _btn(ref_row, "📎 แนบรูป", CYAN, _attach_refs, padx=8)
+    # Resolve callbacks when the user clicks. Their implementations are
+    # defined later in install(), after all page state has been created.
+    attach_btn = _btn(ref_row, "📎 แนบรูป", CYAN, lambda: _attach_refs(), padx=8)
     attach_btn.pack(side="left", padx=(0, 4))
-    latest_btn = _btn(ref_row, "📌 ล่าสุด", PINK, _attach_latest_img, padx=8)
+    latest_btn = _btn(ref_row, "📌 ล่าสุด", PINK, lambda: _attach_latest_img(), padx=8)
     latest_btn.pack(side="left", padx=(0, 4))
     ref_label.pack(side="left")
     tk.Label(ref_row, textvariable=ref_names_var, fg="#1565C0", bg=BG, anchor="w",

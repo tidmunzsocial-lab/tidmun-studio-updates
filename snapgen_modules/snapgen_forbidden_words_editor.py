@@ -37,7 +37,8 @@ def _fetch_from_github(json_path: Path) -> bool:
             data = json.loads(resp.read().decode("utf-8"))
         if isinstance(data, dict) and "words" in data:
             _save_json(json_path, data)
-            print(f"[SnapGen] forbidden words fetched from GitHub: {len(data['words'])} words")
+            if os.environ.get("SNAPGEN_VERBOSE_STARTUP") == "1":
+                print(f"[SnapGen] forbidden words fetched from GitHub: {len(data['words'])} words")
             return True
     except Exception as e:
         print(f"[SnapGen] forbidden words fetch skipped: {e}")
