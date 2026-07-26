@@ -566,6 +566,14 @@ try:
 except Exception:
     pass
 
+# ===========================================================================
+# SECTION NOTE: RECOVERED APPLICATION CORE
+#
+# snapgen_core.cpython-312.pyc is the actual recovered app core, not disposable
+# cache. This launcher executes it into `g`, then the source sections below
+# install controlled fixes/adapters. Do not delete, regenerate, or rename the
+# core as ordinary __pycache__ without an explicit migration plan.
+# ===========================================================================
 _real_mainloop = tk.Misc.mainloop
 tk.Misc.mainloop = lambda self, n=0: None
 
@@ -2570,6 +2578,18 @@ def _clear_export_contents():
     for folder in (EXPORT_VIDEO, EXPORT_IMAGE, EXPORT_REF, EXPORT_PROP, EXPORT_STORY_FACE, EXPORT_KARAOKE):
         folder.mkdir(parents=True, exist_ok=True)
 
+# ===========================================================================
+# SECTION NOTE: GITHUB UPDATE / RESTORE
+#
+# "Update" installs the newest published GitHub Release.
+# "Restore" is the ONE user-facing Restore button and lets the user choose
+# any published GitHub Release version. It restores program files only.
+# It is not a local Backup feature and must never touch export, cookies,
+# accounts, Chrome profiles, settings, or other user/runtime data.
+#
+# Do not add a second Restore button or revive the removed local ZIP Restore.
+# Full map: docs/PROGRAM_ARCHITECTURE_NOTES.md
+# ===========================================================================
 _update_check_running = [False]
 _update_status_waiters = []
 _manual_update_authorized = [False]
@@ -2966,6 +2986,14 @@ def _open_publish_update_window(settings_win, settings_status=None):
     refresh_github_auth()
     win.protocol("WM_DELETE_WINDOW", close)
 
+# ===========================================================================
+# SECTION NOTE: SETTINGS MAINTENANCE BUTTONS
+#
+# This function owns the single row containing Repair, Update, Restore,
+# Clear Export, Account Capture, and (on the publisher machine) Publish.
+# Scan for existing buttons before adding anything so Settings never shows
+# duplicate controls.
+# ===========================================================================
 def _add_settings_maintenance_buttons(settings_win):
     """Add Repair/GitHub Restore/Clear Export buttons; avoid duplicates."""
     try:
@@ -3374,7 +3402,17 @@ def _add_settings_maintenance_buttons(settings_win):
                 except Exception:
                     pass
         def run_restore():
-            """Restore program files from a selected GitHub release version."""
+            """Install a selected GitHub program version, then restart.
+
+            DEVELOPER CONTRACT — THIS IS THE ONLY RESTORE BUTTON:
+            - Source: published Releases in the configured GitHub repository.
+            - User chooses the version; it may be older or newer.
+            - Manifest hashes are verified before installation.
+            - Only allow-listed program files are replaced.
+            - export, snapgen_data, GPT accounts, cookies, Chrome profiles,
+              settings, and user-created work are not Restore targets.
+            - This is not Backup and must not be changed into local ZIP restore.
+            """
             try:
                 from tkinter import messagebox
                 import snapgen_updater
