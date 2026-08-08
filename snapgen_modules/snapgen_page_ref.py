@@ -1144,11 +1144,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return _clip_ref_prompt(
             f"สร้าง CHARACTER REFERENCE IMAGE แนวนอน 16:9 ของ '{name}' คนเดียว. "
             "MANDATORY COMPOSITION: EXACTLY 3 visible depictions เรียงซ้ายไปขวา: (1) FRONT FACE head-and-shoulders หน้าตรงมองกล้อง, (2) THREE-QUARTER VIEW head-and-shoulders หันประมาณ 45 องศา, (3) FULL-BODY FRONT VIEW ยืนตรงเห็นศีรษะถึงเท้าครบ. "
-            "ทั้ง 3 ต้องเป็นคนเดียวกัน หน้าเดียวกัน ทรงผมเดียวกัน และชุดเดียวกันแบบ 100%. FULL-BODY ต้องเห็นเสื้อ ท่อนล่าง รองเท้า และ silhouette ตั้งแต่ศีรษะถึงเท้าครบ. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ. "
-            f"IDENTITY LOCK: {source}. WORLD LOCK: ยุค={film.get('era') or 'ตามบท'}; พื้นที่/วัฒนธรรม={film.get('country_or_region') or film.get('main_location') or 'ตามบท'}; อากาศ={film.get('weather_context') or film.get('climate') or 'ตามบท'}. "
+            "ทั้ง 3 ต้องเป็นคนเดียวกัน หน้าเดียวกัน ทรงผมเดียวกัน และชุดเดียวกันแบบ 100%. FULL-BODY ต้องเห็นเสื้อ กางเกง/กระโปรง/ผ้าถุง รองเท้า accessories ที่ระบุ และ silhouette ตั้งแต่ศีรษะถึงเท้าครบ. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ. "
+            f"IDENTITY LOCK: {source}. WORLD LOCK: ยุค={film.get('era') or 'ตามบท'}; พื้นที่/วัฒนธรรม={film.get('country_or_region') or 'ตามบท'}; อากาศ={film.get('weather_context') or film.get('climate') or 'ตามบท'}. "
             f"WARDROBE: {_character_outfit_instruction(entity, film)} "
             "พื้นหลังขาวหรือเทาอ่อนเรียบ แสง ID-photo สม่ำเสมอ photorealistic, sharp, no text, no watermark.",
-            1800,
+            2400,
         )
     
     g["_clean_character_ref_context"] = _clean_character_ref_context
