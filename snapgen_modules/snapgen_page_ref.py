@@ -13,6 +13,7 @@ import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk as _ttk
+from snapgen_character_wardrobe import wardrobe_prompt_text
 from snapgen_page_builder import (
     make_log_box as _builder_make_log_box,
     append_log as _builder_append_log,
@@ -114,7 +115,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             for key in (
                 "อายุ", "เพศ", "บทบาท", "รูปร่าง", "ส่วนสูง", "สีผิว",
                 "ทรงผม", "ใบหน้า", "ดวงตา", "ดวงต", "เสื้อผ้า",
-                "visual_identity", "ลักษณะเด่น",
+                "visual_identity", "ลักษณะเด่น", "อาชีพ", "ฐานะ", "nationality_or_ethnicity",
+                "wardrobe", "wardrobe_source", "wardrobe_reason",
             ):
                 value = item.get(key)
                 if value is not None and str(value).strip() and str(value).strip() != "ไม่ระบุ":
@@ -382,7 +384,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         "กำหนดชุดเอง",
     )
     outfit_frame = tk.Frame(box, bg="#FAFAF7")
-    outfit_frame.pack(fill="x", pady=(7, 0))
+    # Story-only workflow: wardrobe is automatic; legacy controls stay internal but hidden.
+    ref_outfit_var.set("อัตโนมัติตามเนื้อเรื่อง")
     tk.Label(outfit_frame, text="ชุด:", bg="#FAFAF7", fg="#333", font=("Leelawadee UI", 9)).pack(side="left")
     ref_outfit_combo = _ttk.Combobox(
         outfit_frame,
@@ -756,6 +759,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "summary": str(story.get("summary") or "").strip(),
             "era": str(story.get("era") or "").strip(),
             "main_location": str(story.get("main_location") or "").strip(),
+            "country_or_region": str(story.get("country_or_region") or "").strip(),
+            "climate": str(story.get("climate") or "").strip(),
+            "weather_context": str(story.get("weather_context") or "").strip(),
         }
         return kind, found, film
 
@@ -775,39 +781,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return clipped.rsplit(" ", 1)[0].rstrip(" ,;")
 
     def _character_outfit_instruction(entity, film):
-        """Return clothing-only direction without changing identity traits."""
-        mode = str(ref_outfit_var.get() or "อัตโนมัติตามเนื้อเรื่อง").strip()
-        presets = {
-            "ชุดอยู่บ้าน": (
-                "ชุดอยู่บ้านธรรมดาที่เหมาะกับวัย ฐานะ ยุค และอากาศของเรื่อง "
-                "ห้ามใส่ยูนิฟอร์มหรือชุดทำงานเพียงเพราะตัวละครมีอาชีพ"
-            ),
-            "ชุดทำงาน": "ชุดทำงานที่ตรงกับอาชีพ สถานที่ทำงาน ยุค และฐานะของตัวละคร",
-            "ชุดลำลองออกนอกบ้าน": "ชุดลำลองออกนอกบ้านที่เหมาะกับวัย ยุค สถานที่ และสภาพอากาศ",
-            "ชุดนอน": "ชุดนอนหรือชุดพักผ่อนในบ้านที่เรียบง่าย เหมาะกับวัย ยุค และฐานะ",
-            "ชุดสุภาพ/ทางการ": "ชุดสุภาพหรือชุดทางการที่เหมาะกับวัย ยุค ฐานะ และวัฒนธรรมของเรื่อง",
-        }
-        if mode == "กำหนดชุดเอง":
-            custom = " ".join(ref_custom_outfit_var.get().split()).strip()
-            return f"ใส่ชุดตามนี้เท่านั้น: {custom}" if custom else "ชุดธรรมดาเรียบง่าย ไม่ใช่ยูนิฟอร์ม"
-        if mode in presets:
-            return presets[mode]
-
-        context_clothes = str(entity.get("เสื้อผ้า") or entity.get("clothes") or "").strip() if isinstance(entity, dict) else ""
-        story_hint = str(film.get("summary") or "").strip() if isinstance(film, dict) else ""
-        if story_hint:
-            story_hint = _clip_ref_prompt(story_hint, 120)
-            clothes_hint = ""
-            if context_clothes and context_clothes not in ("ไม่ระบุ", "null", "None"):
-                clothes_hint = f"; ข้อมูลชุดเดิมคือ {context_clothes} ใช้ได้เฉพาะเมื่อเข้ากับสถานการณ์หลัก"
-            return (
-                f"เลือกชุดที่ตัวละครใช้ในสถานการณ์หลักของเรื่องนี้: {story_hint}; "
-                "อาชีพเป็นเพียงข้อมูลพื้นหลัง ห้ามใช้ชุดทำงานถ้าเหตุการณ์หลักไม่ได้อยู่ที่ทำงาน"
-                f"{clothes_hint}"
-            )
-        if context_clothes and context_clothes not in ("ไม่ระบุ", "null", "None"):
-            return f"เลือกชุดหลักจาก Context: {context_clothes}"
-        return "ชุดธรรมดาที่เหมาะกับสถานการณ์หลักของตัวละคร ไม่อนุมานยูนิฟอร์มจากอาชีพ"
+        """Return one story-derived wardrobe lock; no user wardrobe input required."""
+        return wardrobe_prompt_text(entity if isinstance(entity, dict) else {}, film if isinstance(film, dict) else {})
 
     def _outfit_name_hint(name, kind):
         if str(kind or "").lower() == "location":
@@ -1154,7 +1129,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         # Character Ref is an attachment-ready identity sheet.  Context only
         # locks visible identity traits; story events and locations stay out.
         details = _useful_context_fields(entity, (
-            ("visual_identity", "ภาพจำ"), ("อายุ", "วัย"), ("เพศ", "เพศ"),
+            ("visual_identity", "ภาพจำ"), ("อายุ", "วัย"), ("เพศ", "เพศ/การนำเสนอ"),
+            ("nationality_or_ethnicity", "ชาติพันธุ์/สัญชาติ"), ("อาชีพ", "อาชีพ"), ("ฐานะ", "ฐานะ/บริบทสังคม"),
             ("รูปร่าง", "รูปร่าง"), ("ส่วนสูง", "ส่วนสูง"), ("สีผิว", "สีผิว"),
             ("ทรงผม", "ผม"), ("ใบหน้า", "ใบหน้า"), ("ดวงตา", "ดวงตา"),
             ("ลักษณะเด่น", "จุดจำ"),
@@ -1166,13 +1142,13 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             190,
         )
         return _clip_ref_prompt(
-            f"สร้าง CHARACTER REFERENCE SHEET ของ '{name}' คนเดียว. "
-            "ด้านบนเป็นใบหน้า close-up ใหญ่ 4 ช่อง: หน้าตรง, ซ้าย, ขวา, สามส่วน; ต้องเป็นคนเดียวกัน สีหน้าเป็นกลาง เห็นหน้า ผม และดวงตาชัด. "
-            "ด้านล่างเป็นภาพเต็มตัว 2 มุม: ด้านหน้าและด้านหลัง ชุดและสัดส่วนเดียวกัน. "
-            f"แถบล่างใส่ชื่อไทย '{name}' ครั้งเดียว. ล็อกรูปลักษณ์จาก Character Bible: {source}. "
-            f"เปลี่ยนเฉพาะเสื้อผ้า: {_character_outfit_instruction(entity, film)}. "
-            "พื้นขาว แสง high-key 5600K สว่างสม่ำเสมอ สีผิวตรงจริง. "
-            "ห้ามฉาก พร็อพ คนอื่น อารมณ์เหตุการณ์ บาดแผล โทนมืด กลางคืน และ watermark. photorealistic, sharp."
+            f"สร้าง CHARACTER REFERENCE IMAGE แนวนอน 16:9 ของ '{name}' คนเดียว. "
+            "MANDATORY COMPOSITION: EXACTLY 3 visible depictions เรียงซ้ายไปขวา: (1) FRONT FACE head-and-shoulders หน้าตรงมองกล้อง, (2) THREE-QUARTER VIEW head-and-shoulders หันประมาณ 45 องศา, (3) FULL-BODY FRONT VIEW ยืนตรงเห็นศีรษะถึงเท้าครบ. "
+            "ทั้ง 3 ต้องเป็นคนเดียวกัน หน้าเดียวกัน ทรงผมเดียวกัน และชุดเดียวกันแบบ 100%. FULL-BODY ต้องเห็นเสื้อ ท่อนล่าง รองเท้า และ silhouette ตั้งแต่ศีรษะถึงเท้าครบ. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ. "
+            f"IDENTITY LOCK: {source}. WORLD LOCK: ยุค={film.get('era') or 'ตามบท'}; พื้นที่/วัฒนธรรม={film.get('country_or_region') or film.get('main_location') or 'ตามบท'}; อากาศ={film.get('weather_context') or film.get('climate') or 'ตามบท'}. "
+            f"WARDROBE: {_character_outfit_instruction(entity, film)} "
+            "พื้นหลังขาวหรือเทาอ่อนเรียบ แสง ID-photo สม่ำเสมอ photorealistic, sharp, no text, no watermark.",
+            1800,
         )
     
     g["_clean_character_ref_context"] = _clean_character_ref_context

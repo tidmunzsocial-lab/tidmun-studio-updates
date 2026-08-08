@@ -6,6 +6,8 @@ import json
 import time
 from pathlib import Path
 
+from snapgen_character_wardrobe import apply_character_wardrobe
+
 UNKNOWN_VALUES = {"", "ไม่ระบุ", "unknown", "null", "None", None}
 CHAR_FIELDS = ["อายุ", "เพศ", "สีผิว", "ทรงผม", "ใบหน้า", "เสื้อผ้า", "ลักษณะเด่น"]
 
@@ -86,6 +88,8 @@ def normalize_context_master(base, data=None, invent=False):
         for f in CHAR_FIELDS:
             if ch.get(f) in UNKNOWN_VALUES:
                 ch[f] = invent_missing_char_detail(ch, f) if invent else "ไม่ระบุ"
+        # Story-driven wardrobe contract; old Context files remain valid.
+        apply_character_wardrobe(ch, story)
     return master
 
 

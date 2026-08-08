@@ -1,21 +1,17 @@
 ﻿# Latest Work Report
 
-Current task: Prompt-Ref Context system documentation audit
+Current task: Story-driven Character Reference wardrobe
 
 Status: completed
 
-Primary documentation:
-- `docs/PROMPT_REF_CONTEXT_SYSTEM.md`
-
 Full work report:
-- `docs/work-reports/2026-08-08_prompt-ref-context-system-map.md`
+- docs/work-reports/2026-08-08_character-reference-story-wardrobe.md
 
 Key handoff:
-- No source code was changed for this task.
-- Prompt-Ref is the owner of the central story/context/history flow; Ref, Prop and Image consume shared Context data but do not all share the Prompt-Ref ChatGPT cursor.
-- Before changing Prompt-Ref, read the system map and verify the active working-tree call path.
-- Two investigation warnings are documented: v4 breakdown vs v3 compatibility Context, and storyboard transport documentation vs current temporary-Vision + text-writeback implementation.
-
-Validation baseline:
-- Targeted Prompt-Ref tests: FAILED (18 run; 4 failures, 4 errors) on the pre-existing working tree. No test/source code was changed in this documentation-only task.
-
+- Character Ref now derives/normalizes wardrobe automatically from Prompt-Ref Context/story; no wardrobe input is required from the user.
+- New wardrobe contract contains default outfit components, explicit/inferred source, reason, and optional variants.
+- Legacy Context without wardrobe is upgraded safely during context normalization.
+- Ref prompt locks one identical outfit across Front / 3/4 / Full-body and includes world/identity/social context.
+- New wardrobe tests: 6/6 pass.
+- Existing Prompt-Ref/Storyboard baseline remains 18 tests with 4 failures and 4 errors; no increase from this task.
+- Working tree still contains unrelated pre-existing uncommitted changes; do not stage them blindly.
