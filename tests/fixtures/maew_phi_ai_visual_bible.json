@@ -1,0 +1,42 @@
+﻿{
+  "version": 5,
+  "story": {"title": "แมวผี (อาย)", "era": "พ.ศ. 2540", "country_or_region": "ชนบทไทย"},
+  "main_characters": [
+    {
+      "character_id": "kan", "name": "กัน", "entity_type": "human", "needs_ref": true,
+      "appearance": {"age": "วัยรุ่น", "gender": "ชาย", "body": "สมส่วน", "height": "ประมาณ 170 ซม.", "skin": "ผิวสองสี", "hair": "ผมดำสั้น", "face": "หน้ารูปไข่", "eyes": "ตาสีน้ำตาล"},
+      "occupation": "นักเรียน/ช่วยงานครอบครัว", "social_status": "ครอบครัวชาวบ้าน",
+      "wardrobe": {"top": "เสื้อยืดเรียบ", "bottom": "กางเกงลำลองขายาว", "footwear": "รองเท้าแตะ", "outerwear": "ไม่มี", "accessories": "ไม่มี", "colors": "สีหม่นใช้งานจริง", "materials": "ผ้าฝ้าย", "condition": "ผ่านการใช้งาน", "overall_style": "ชุดลำลองตาม Visual Bible", "source": "inferred", "reason": "เหมาะกับวัยและชีวิตในครอบครัวตามบท"},
+      "visual_identity": "วัยรุ่นชายไทยผมดำสั้น หน้ารูปไข่ รูปร่างสมส่วน", "evidence": ["กันเป็นตัวละครวัยรุ่นในครอบครัว"], "assumptions": ["ชุดลำลองอนุมานเพื่อภาพ"]
+    }
+  ],
+  "supporting_characters": [
+    {
+      "character_id": "mother", "name": "แม่", "entity_type": "human", "needs_ref": true,
+      "appearance": {"age": "หญิงวัยกลางคน", "gender": "หญิง", "body": "รูปร่างธรรมดา", "height": "ส่วนสูงปานกลาง", "skin": "ผิวสองสี", "hair": "ผมดำรวบเรียบ", "face": "ใบหน้าอ่อนล้าแบบแม่บ้าน", "eyes": "ตาสีน้ำตาล"},
+      "occupation": "ดูแลบ้าน", "social_status": "ครอบครัวชาวบ้าน",
+      "wardrobe": {"top": "เสื้อผ้าฝ้ายเรียบสำหรับอยู่บ้าน", "bottom": "ผ้าถุงลายเรียบ", "footwear": "รองเท้าแตะในบ้าน", "outerwear": "ไม่มี", "accessories": "ไม่มี", "colors": "น้ำตาลหม่นและครีม", "materials": "ผ้าฝ้าย", "condition": "ใช้งานประจำวัน", "overall_style": "หญิงวัยกลางคนอยู่บ้านในชนบท", "source": "inferred", "reason": "อิงบทบาทแม่ที่อยู่บ้านและบริบทครอบครัว"},
+      "visual_identity": "หญิงไทยวัยกลางคน ผมรวบ ใบหน้าอ่อนล้าแต่ใจดี", "evidence": ["แม่อยู่ในบริบทบ้านและครอบครัว"], "assumptions": ["รายละเอียดชุดสมมุติเพื่อภาพ"]
+    },
+    {
+      "character_id": "uncle-thueang", "name": "ลุงเทือง", "entity_type": "human", "needs_ref": true,
+      "appearance": {"age": "สูงวัย", "gender": "ชาย", "body": "ผอมสมส่วน", "height": "ส่วนสูงปานกลาง", "skin": "ผิวคล้ำแดด", "hair": "ผมหงอกสั้น", "face": "ใบหน้าสูงวัย", "eyes": "ตาสีน้ำตาลเข้ม"},
+      "occupation": "มัคนายก", "social_status": "ผู้ใหญ่ในชุมชน",
+      "wardrobe": {"top": "เสื้อเชิ้ตสุภาพสีอ่อน", "bottom": "กางเกงขายาวสีเข้ม", "footwear": "รองเท้าแตะสุภาพ", "outerwear": "ไม่มี", "accessories": "ไม่มี", "colors": "ขาวหม่นและน้ำตาลเข้ม", "materials": "ผ้าฝ้าย", "condition": "สะอาดเรียบร้อย", "overall_style": "มัคนายกชุมชนชนบท", "source": "inferred", "reason": "อิงบทบาทมัคนายกและบริบทชุมชน"},
+      "visual_identity": "ชายสูงวัยผมหงอก บุคลิกผู้ใหญ่ในชุมชน", "evidence": ["ลุงเทืองเป็นมัคนายก"], "assumptions": ["รายละเอียดชุดสมมุติเพื่อภาพ"]
+    },
+    {
+      "character_id": "medium-phokae", "name": "ร่างทรงพ่อแก่", "entity_type": "human", "needs_ref": true,
+      "appearance": {"age": "วัยกลางคน", "gender": "ชาย", "body": "ผอม", "height": "ส่วนสูงปานกลาง", "skin": "ผิวสองสี", "hair": "ผมดำแซมหงอก", "face": "ใบหน้าคมเคร่ง", "eyes": "สายตาคม"},
+      "occupation": "ร่างทรง", "social_status": "ผู้ทำพิธีในชุมชน",
+      "wardrobe": {"top": "เสื้อพิธีสีขาวเรียบ", "bottom": "กางเกงผ้าสีขาว", "footwear": "เท้าเปล่าระหว่างพิธี", "outerwear": "ไม่มี", "accessories": "ผ้าคาดเอวพิธี", "colors": "ขาวและแดงหม่น", "materials": "ผ้าฝ้าย", "condition": "ชุดพิธีที่ใช้งานจริง", "overall_style": "เครื่องแต่งกายร่างทรงตามพิธี", "source": "inferred", "reason": "อิงบทบาทร่างทรงและสถานการณ์ประกอบพิธี"},
+      "visual_identity": "ชายวัยกลางคนหน้าคมเคร่ง มีบุคลิกของผู้ประกอบพิธี", "evidence": ["ตัวละครเป็นร่างทรงพ่อแก่"], "assumptions": ["รายละเอียดชุดพิธีสมมุติเพื่อภาพ"]
+    }
+  ],
+  "animals": [
+    {"character_id": "ghost-cat", "name": "แมว", "entity_type": "animal", "needs_ref": true, "appearance": {"age": "โตเต็มวัย", "gender": "", "body": "แมวบ้านขนาดกลาง", "height": "", "skin": "", "hair": "ขนสั้น", "face": "หน้าแมวบ้าน", "eyes": "ตาสะท้อนแสง"}, "occupation": "", "social_status": "", "wardrobe": null, "visual_identity": "แมวขนสั้นที่มีลักษณะน่าขนลุกตามเรื่อง", "evidence": ["บทมีแมวเป็น entity สำคัญ"], "assumptions": []}
+  ],
+  "supernatural_entities": [],
+  "locations": [{"name": "บ้าน"}, {"name": "วัด"}, {"name": "สถานที่ประกอบพิธี"}],
+  "props": [], "scene_map": []
+}

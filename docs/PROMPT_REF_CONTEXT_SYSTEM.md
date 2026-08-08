@@ -472,3 +472,42 @@ Prompt-Ref semantic layer สร้าง categorized v4 แต่ `snapgen_cont
 - GitHub HEAD อย่างเดียวเมื่อ working tree มีงานค้าง
 
 ระบบจริง ณ เครื่องผู้ใช้ = **checkout + working tree + runtime state + active call path**
+
+---
+
+## Final Character Visual Bible Architecture (2026-08-08)
+
+Character Reference ใช้ **AI-generated canonical Character Visual Bible เป็น semantic source of truth เพียงจุดเดียว**
+
+Flow:
+
+`บทต้นฉบับ -> Prompt-Ref AI -> canonical Character Visual Bible v5 -> structural validation/targeted missing-field repair -> prompt_ref_context.json/context_master.json -> Ref lookup by character_id/exact name -> direct serialization -> Image AI`
+
+Canonical character fields:
+
+- `character_id`, `name`, `entity_type`, `needs_ref`
+- `appearance.age/gender/body/height/skin/hair/face/eyes`
+- `occupation`, `social_status`
+- `wardrobe.top/bottom/footwear/outerwear/accessories/colors/materials/condition/overall_style/source/reason`
+- `visual_identity`, `evidence[]`, `assumptions[]`
+
+Architecture rules:
+
+- AI decides character semantics and wardrobe from the story. Python must not assign clothing presets based on role/location/keywords.
+- Legacy Thai/typo keys are migrated once at the load boundary and removed from the canonical object.
+- A repair request contains only the missing field paths for the matching `character_id`/name. Existing non-empty values always win over repair values.
+- Ref character lookup is by `character_id` or exact canonical name, never array position.
+- Character Ref prompt is serialized from that one canonical object. Front / 3/4 / Full-body use the same wardrobe object.
+- Animal/supernatural wardrobe may be `null`; Python must not add human clothes.
+- Character Ref does not run a second semantic wardrobe/identity design pass.
+- Every Character Ref request writes `snapgen_data/debug/ref_last_request.json` with the exact canonical character and final prompt used for the request. Runtime debug data is not committed.
+
+Primary implementation:
+
+- `snapgen_modules/snapgen_character_visual_bible.py`
+- `snapgen_modules/snapgen_prompt_ref_visual_normalization.py`
+- `snapgen_modules/snapgen_character_ref_request.py`
+- `snapgen_modules/snapgen_context_tools.py`
+- `snapgen_modules/snapgen_page_ref.py`
+
+Compatibility facade `snapgen_modules/snapgen_character_wardrobe.py` may serialize/migrate existing wardrobe data but must not infer semantic clothing.

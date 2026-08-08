@@ -6,7 +6,7 @@ import json
 import time
 from pathlib import Path
 
-from snapgen_character_wardrobe import apply_character_wardrobe
+from snapgen_character_visual_bible import canonicalize_context, missing_character_fields
 
 UNKNOWN_VALUES = {"", "ไม่ระบุ", "unknown", "null", "None", None}
 CHAR_FIELDS = ["อายุ", "เพศ", "สีผิว", "ทรงผม", "ใบหน้า", "เสื้อผ้า", "ลักษณะเด่น"]
@@ -40,56 +40,15 @@ def load_context_any(base):
 
 
 def invent_missing_char_detail(ch, field):
-    name = ch.get("name", "ตัวละคร")
-    defaults = {
-        "อายุ": "วัยผู้ใหญ่ตอนต้น (สมมุติเพื่อภาพ)",
-        "เพศ": "ไม่ระบุเพศชัดเจน (สมมุติเพื่อภาพ)",
-        "สีผิว": "ผิวสองสีธรรมชาติแบบไทย (สมมุติเพื่อภาพ)",
-        "ทรงผม": "ผมสีดำทรงเรียบร้อย ไม่ปิดหน้า (สมมุติเพื่อภาพ)",
-        "ใบหน้า": "ใบหน้าคนไทยสมจริง แสงสม่ำเสมอ มองเห็นชัด (สมมุติเพื่อภาพ)",
-        "เสื้อผ้า": "เสื้อผ้าร่วมสมัยเรียบง่าย สีไม่ฉูดฉาด (สมมุติเพื่อภาพ)",
-        "ลักษณะเด่น": f"บุคลิกจำง่ายของ{name} แต่ยังสมจริง (สมมุติเพื่อภาพ)",
-    }
-    return defaults.get(field, "รายละเอียดสมจริง (สมมุติเพื่อภาพ)")
+    """Deprecated compatibility hook; semantic defaults are forbidden."""
+    return ""
 
 
 def normalize_context_master(base, data=None, invent=False):
+    """Legacy load boundary: canonicalize structure once without semantic inference."""
     data = data if isinstance(data, dict) else load_context_any(base)
-    master = {
-        "version": 3,
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "story": data.get("story") if isinstance(data.get("story"), dict) else {"raw": str(data.get("story", ""))},
-        "characters": data.get("characters") if isinstance(data.get("characters"), list) else [],
-        "locations": data.get("locations") if isinstance(data.get("locations"), list) else [],
-        "props": data.get("props") if isinstance(data.get("props"), list) else [],
-        "scene_map": data.get("scene_map") if isinstance(data.get("scene_map"), list) else [],
-        "visual_rules": data.get("visual_rules") if isinstance(data.get("visual_rules"), dict) else {},
-        "forbidden": data.get("forbidden") if isinstance(data.get("forbidden"), list) else [],
-        "locks": data.get("locks") if isinstance(data.get("locks"), dict) else {},
-    }
-
-    loc_names = {loc.get("name") for loc in master["locations"] if isinstance(loc, dict) and loc.get("name")}
-    story = master.get("story", {})
-    for name in story.get("key_places", []) if isinstance(story, dict) else []:
-        if name and name not in loc_names:
-            master["locations"].append({"name": name, "type": "location"})
-            loc_names.add(name)
-    for sc in master["scene_map"]:
-        if isinstance(sc, dict):
-            name = sc.get("place") or sc.get("location")
-            if name and name not in loc_names:
-                master["locations"].append({"name": name, "type": "location", "note": sc.get("note", "")})
-                loc_names.add(name)
-
-    for ch in master["characters"]:
-        if not isinstance(ch, dict):
-            continue
-        ch.setdefault("locks", {"face": True, "clothes": True, "allow_outfit_change_by_scene": False})
-        for f in CHAR_FIELDS:
-            if ch.get(f) in UNKNOWN_VALUES:
-                ch[f] = invent_missing_char_detail(ch, f) if invent else "ไม่ระบุ"
-        # Story-driven wardrobe contract; old Context files remain valid.
-        apply_character_wardrobe(ch, story)
+    master = canonicalize_context(data)
+    master["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     return master
 
 
@@ -101,14 +60,12 @@ def context_health(base, data=None):
     for ch in m.get("characters", []):
         if not isinstance(ch, dict):
             continue
-        name = ch.get("name", "(ไม่มีชื่อ)")
-        for f in CHAR_FIELDS:
-            total += 1
-            if ch.get(f) not in UNKNOWN_VALUES and ch.get(f) != "ไม่ระบุ":
-                ok += 1
-            else:
-                issues.append(f"{name} ไม่มี {f}")
-    for key, msg in [("locations", "ไม่มีสถานที่"), ("props", "ไม่มี props"), ("scene_map", "ไม่มี scene map")]:
+        missing = missing_character_fields(ch)
+        checked = 1 + (17 if str(ch.get("entity_type") or "").casefold() == "human" and ch.get("needs_ref") else 0)
+        total += checked
+        ok += max(0, checked - len(missing))
+        issues.extend(f"{ch.get('name') or '(ไม่มีชื่อ)'} ไม่มี {field}" for field in missing)
+    for key, msg in (("locations", "ไม่มีสถานที่"), ("props", "ไม่มี props"), ("scene_map", "ไม่มี scene map")):
         total += 1
         if m.get(key):
             ok += 1
@@ -116,7 +73,6 @@ def context_health(base, data=None):
             issues.append(msg)
     score = int((ok / total) * 100) if total else 0
     return score, issues, m
-
 
 def write_context_master(base, data=None, invent=False, sync_ref=True):
     """Normalize and persist one canonical Context for every SnapGen page."""
@@ -171,7 +127,9 @@ def prompt_preview_text(base):
     m = normalize_context_master(base, load_context_any(base), invent=False)
     lines = ["Prompt Preview Source", "", "Characters:"]
     for ch in m.get("characters", [])[:5]:
-        lines.append(f"- {ch.get('name')}: {ch.get('อายุ')} | {ch.get('ใบหน้า')} | {ch.get('เสื้อผ้า')} | lock={ch.get('locks')}")
+        appearance = ch.get("appearance") if isinstance(ch.get("appearance"), dict) else {}
+        wardrobe = ch.get("wardrobe") if isinstance(ch.get("wardrobe"), dict) else {}
+        lines.append(f"- {ch.get('name')}: {appearance.get('age')} | {appearance.get('face')} | {wardrobe.get('overall_style') or wardrobe.get('top') or ''}")
     lines += ["", "Scenes:"]
     for sc in m.get("scene_map", [])[:5]:
         if isinstance(sc, dict):

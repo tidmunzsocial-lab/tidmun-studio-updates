@@ -14,6 +14,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk as _ttk
 from snapgen_character_wardrobe import wardrobe_prompt_text
+from snapgen_character_ref_request import character_prompt_text, save_debug_snapshot
+from snapgen_character_visual_bible import canonicalize_context, find_character
 from snapgen_prompt_ref_visual_normalization import install_prompt_ref_visual_normalization
 from snapgen_page_builder import (
     make_log_box as _builder_make_log_box,
@@ -130,10 +132,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             import json as _json
             data = _json.loads(context_text)
             if isinstance(data, dict):
-                for item in data.get("characters", []) or data.get("ตัวละคร", []) or []:
-                    add_character(item)
-                if characters:
-                    return characters
+                canonical = canonicalize_context(data)
+                if canonical.get("characters"):
+                    return canonical["characters"]
         except Exception:
             pass
 
@@ -726,7 +727,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return ". ".join(parts)
     
     def _context_entity(name, requested_kind=""):
-        """Return the matching entity plus film-level context from Prompt Context."""
+        """Bind Ref to one canonical character by character_id or exact name; never by array index."""
         import json as _json
         raw = _load_ref_context()
         try:
@@ -735,38 +736,24 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             data = {}
         if not isinstance(data, dict):
             return requested_kind, {}, {}
-        wanted = str(name or "").strip().casefold()
         kind = str(requested_kind or "").strip().lower()
-        found = {}
+        story = data.get("story") if isinstance(data.get("story"), dict) else {}
         if kind != "location":
-            for item in data.get("characters", []) or []:
-                if isinstance(item, dict) and str(item.get("name", "")).strip().casefold() == wanted:
-                    found = item
-                    kind = "character"
-                    break
-        if not found and kind != "character":
+            canonical = canonicalize_context(data)
+            found = find_character(canonical, name)
+            if found:
+                return "character", found, story
+        if kind != "character":
+            wanted = str(name or "").strip().casefold()
             pools = []
             pools.extend(data.get("locations", []) or [])
             pools.extend(data.get("scene_map", []) or [])
-            story = data.get("story") if isinstance(data.get("story"), dict) else {}
             pools.extend(story.get("key_places", []) or [])
             for item in pools:
                 item_name = (item.get("name") or item.get("place") or item.get("location")) if isinstance(item, dict) else item
                 if str(item_name or "").strip().casefold() == wanted:
-                    found = item if isinstance(item, dict) else {"name": item_name}
-                    kind = "location"
-                    break
-        story = data.get("story") if isinstance(data.get("story"), dict) else {}
-        film = {
-            "summary": str(story.get("summary") or "").strip(),
-            "era": str(story.get("era") or "").strip(),
-            "main_location": str(story.get("main_location") or "").strip(),
-            "country_or_region": str(story.get("country_or_region") or "").strip(),
-            "climate": str(story.get("climate") or "").strip(),
-            "weather_context": str(story.get("weather_context") or "").strip(),
-        }
-        return kind, found, film
-
+                    return "location", (item if isinstance(item, dict) else {"name": item_name}), story
+        return kind, {}, story
     def _useful_context_fields(entity, fields):
         rows = []
         for key, label in fields:
@@ -1128,31 +1115,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 "ห้ามคน เหตุการณ์ วิญญาณ โทนมืด กลางคืน หมอก ฝน floor plan ภาพ 3D cutaway สถานที่อื่น และ watermark. photorealistic, sharp."
             )
 
-        # Character Ref is an attachment-ready identity sheet.  Context only
-        # locks visible identity traits; story events and locations stay out.
-        details = _useful_context_fields(entity, (
-            ("visual_identity", "ภาพจำ"), ("อายุ", "วัย"), ("เพศ", "เพศ/การนำเสนอ"),
-            ("nationality_or_ethnicity", "ชาติพันธุ์/สัญชาติ"), ("อาชีพ", "อาชีพ"), ("ฐานะ", "ฐานะ/บริบทสังคม"),
-            ("รูปร่าง", "รูปร่าง"), ("ส่วนสูง", "ส่วนสูง"), ("สีผิว", "สีผิว"),
-            ("ทรงผม", "ผม"), ("ใบหน้า", "ใบหน้า"), ("ดวงตา", "ดวงตา"),
-            ("ลักษณะเด่น", "จุดจำ"),
-        ))
-        if not details and selected_match and selected_ctx:
-            details = selected_ctx
-        source = _clip_ref_prompt(
-            details or "คนไทยสมจริงหนึ่งแบบตามชื่อและบทบาทใน Context",
-            190,
-        )
-        return _clip_ref_prompt(
-            f"สร้าง CHARACTER REFERENCE IMAGE แนวนอน 16:9 ของ '{name}' คนเดียว. "
-            "MANDATORY COMPOSITION: EXACTLY 3 visible depictions เรียงซ้ายไปขวา: (1) FRONT FACE head-and-shoulders หน้าตรงมองกล้อง, (2) THREE-QUARTER VIEW head-and-shoulders หันประมาณ 45 องศา, (3) FULL-BODY FRONT VIEW ยืนตรงเห็นศีรษะถึงเท้าครบ. "
-            "ทั้ง 3 ต้องเป็นคนเดียวกัน หน้าเดียวกัน ทรงผมเดียวกัน และชุดเดียวกันแบบ 100%. FULL-BODY ต้องเห็นเสื้อ กางเกง/กระโปรง/ผ้าถุง รองเท้า accessories ที่ระบุ และ silhouette ตั้งแต่ศีรษะถึงเท้าครบ. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ. "
-            f"IDENTITY LOCK: {source}. WORLD LOCK: ยุค={film.get('era') or 'ตามบท'}; พื้นที่/วัฒนธรรม={film.get('country_or_region') or 'ตามบท'}; อากาศ={film.get('weather_context') or film.get('climate') or 'ตามบท'}. "
-            f"WARDROBE: {_character_outfit_instruction(entity, film)} "
-            "พื้นหลังขาวหรือเทาอ่อนเรียบ แสง ID-photo สม่ำเสมอ photorealistic, sharp, no text, no watermark.",
-            2400,
-        )
-    
+        # Character Ref is a pure serialization of one canonical Character Visual Bible object.
+        # No wardrobe inference or cross-character lookup is allowed here.
+        return _clip_ref_prompt(character_prompt_text(entity), 4200)
     g["_clean_character_ref_context"] = _clean_character_ref_context
     g["_extract_character_appearance"] = _extract_character_appearance
     g["_context_entity_for_ref"] = _context_entity
@@ -1324,26 +1289,29 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     else:
                         _ref_log(f"[context] พบเพียงชื่อ {name} — เติมเฉพาะรายละเอียดที่ Context ไม่ระบุ")
                     refine = g.get("_refine_prompt_via_ai") or globals().get("_refine_prompt_via_ai")
-                    if callable(refine):
-                        _ref_log(f"[refine] ส่ง GPT แปลง prompt Ref: {name}")
-                        # Select details are already embedded in `prompt`.
-                        # Never append the full story context here.
+                    is_location_ref = bool(context_kind == "location" or entity_kind == "location")
+                    if is_location_ref and callable(refine):
+                        _ref_log(f"[refine] ส่ง GPT แปลง prompt Location Ref: {name}")
                         refined_prompt = refine(prompt, kind="ref", use_context=False)
                         if refined_prompt and refined_prompt != prompt:
                             _ref_log(f"[refine] ได้ prompt ใหม่ ({len(refined_prompt)} chars)")
                             prompt = refined_prompt
-                    else:
-                        _ref_log("[refine] ไม่เจอตัวแปลง prompt — ใช้ prompt เดิม")
+                    elif context_kind == "character":
+                        _ref_log("[refine] ข้าม Character Ref — ใช้ canonical Visual Bible prompt โดยตรง")
                     if auto and auto_ref_stop[0]:
                         _ref_log(f"[auto-ref] หยุดแล้ว — ข้าม {name}")
                         return
                     _ref_log(f"[auto-ref] รูปที่ {idx}/{len(names)} — เริ่มสร้าง: {name}")
-                    payload = {"model":"gpt-5-5", "prompt":prompt, "n":1, "aspect_ratio":"1:1", "history_and_training_disabled":False}
+                    ref_aspect_ratio = "1:1" if is_location_ref else "16:9"
+                    payload = {"model":"gpt-5-5", "prompt":prompt, "n":1, "aspect_ratio":ref_aspect_ratio, "history_and_training_disabled":False}
                     if ref_image and os.path.exists(ref_image):
                         with open(ref_image, "rb") as _f:
                             import base64 as _b64
                             payload["images"] = [_b64.b64encode(_f.read()).decode("utf-8")]
                         _ref_log(f"[ref] แนบรูปอ้างอิง: {os.path.basename(ref_image)}")
+                    if context_kind == "character" and context_entity:
+                        debug_path = save_debug_snapshot(BASE, context_entity, prompt)
+                        _ref_log(f"[debug] Character Ref snapshot: {debug_path}")
                     file_hint = _outfit_name_hint(name, entity_kind or context_kind)
                     out = g["_do_image_request"](payload, is_edit=bool(ref_image and os.path.exists(ref_image)), prompt=prompt, name_hint=file_hint, raw_prompt=prompt, output_dir=str(export_ref_dir))
                     root.after(0, lambda out=out: (_ref_log(f"✓ {out}"), _ref_gallery_add(out, True), _notify_done()))
