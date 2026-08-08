@@ -1,4 +1,4 @@
-﻿{
+{
   "version": 5,
   "story": {"title": "แมวผี (อาย)", "era": "พ.ศ. 2540", "country_or_region": "ชนบทไทย"},
   "main_characters": [
@@ -6,31 +6,133 @@
       "character_id": "kan", "name": "กัน", "entity_type": "human", "needs_ref": true,
       "appearance": {"age": "วัยรุ่น", "gender": "ชาย", "body": "สมส่วน", "height": "ประมาณ 170 ซม.", "skin": "ผิวสองสี", "hair": "ผมดำสั้น", "face": "หน้ารูปไข่", "eyes": "ตาสีน้ำตาล"},
       "occupation": "นักเรียน/ช่วยงานครอบครัว", "social_status": "ครอบครัวชาวบ้าน",
-      "wardrobe": {"top": "เสื้อยืดเรียบ", "bottom": "กางเกงลำลองขายาว", "footwear": "รองเท้าแตะ", "outerwear": "ไม่มี", "accessories": "ไม่มี", "colors": "สีหม่นใช้งานจริง", "materials": "ผ้าฝ้าย", "condition": "ผ่านการใช้งาน", "overall_style": "ชุดลำลองตาม Visual Bible", "source": "inferred", "reason": "เหมาะกับวัยและชีวิตในครอบครัวตามบท"},
+      "wardrobe": {
+        "top": "เสื้อยืดคอกลมสีกรมท่าซีด",
+        "bottom": "กางเกงลำลองขายาวสีน้ำตาลเข้ม",
+        "footwear": "รองเท้าแตะยางสีดำ",
+        "outerwear": "ไม่มี",
+        "accessories": "ไม่มี",
+        "colors": "กรมท่าซีดและน้ำตาลเข้ม",
+        "materials": "ผ้าฝ้ายบาง",
+        "condition": "ซีดจาง ผ่านการใช้งานนาน",
+        "overall_style": "วัยรุ่นชาวบ้านชนบทลำลอง",
+        "source": "inferred",
+        "reason": "วัยรุ่นชายในครอบครัวชาวบ้าน พ.ศ. 2540 ชนบทไทย"
+      },
+      "costume_identity": {
+        "signature_palette": ["กรมท่าซีด", "น้ำตาลเข้ม"],
+        "signature_silhouette": "เสื้อยืดแขนสั้นหลวม + กางเกงขายาวทรงตรง",
+        "signature_material_or_texture": "ผ้าฝ้ายบางซีดจาง",
+        "recognition_cue": "เสื้อยืดกรมท่าซีด + กางเกงน้ำตาลเข้ม + รองเท้าแตะดำ",
+        "avoid_overlap_with": ["pee-chai", "mother", "uncle-thueang", "medium-phokae"]
+      },
       "visual_identity": "วัยรุ่นชายไทยผมดำสั้น หน้ารูปไข่ รูปร่างสมส่วน", "evidence": ["กันเป็นตัวละครวัยรุ่นในครอบครัว"], "assumptions": ["ชุดลำลองอนุมานเพื่อภาพ"]
     }
   ],
   "supporting_characters": [
     {
+      "character_id": "pee-chai", "name": "พี่ชาย", "entity_type": "human", "needs_ref": true,
+      "appearance": {"age": "วัยหนุ่ม 20 ต้น", "gender": "ชาย", "body": "สมส่วนแข็งแรงกว่ากัน", "height": "ประมาณ 172 ซม.", "skin": "ผิวสองสีคล้ำกว่า", "hair": "ผมดำสั้นทรงธรรมดา", "face": "หน้าสี่เหลี่ยม", "eyes": "ตาสีน้ำตาล"},
+      "occupation": "ทำงานนอกบ้าน/ช่วยงานครอบครัว", "social_status": "ครอบครัวชาวบ้าน",
+      "wardrobe": {
+        "top": "เสื้อเชิ้ตคอปกลายตารางสีเขียวและขาว",
+        "bottom": "กางเกงยีนส์ขายาวสีครามเข้ม",
+        "footwear": "รองเท้าผ้าใบสีขาวสกปรก",
+        "outerwear": "ไม่มี",
+        "accessories": "นาฬิกาข้อมือพลาสติกสีดำ",
+        "colors": "เขียวและขาวลายตาราง ครามเข้ม",
+        "materials": "ผ้าฝ้ายทอและผ้าเดนิม",
+        "condition": "ใหม่กว่ากันเล็กน้อยแต่ยังเป็นชาวบ้าน",
+        "overall_style": "หนุ่มชนบทวัยทำงาน",
+        "source": "inferred",
+        "reason": "พี่ชายวัยทำงานในชนบท ชุดแตกต่างจากน้องชายกันอย่างชัดเจน"
+      },
+      "costume_identity": {
+        "signature_palette": ["เขียวและขาวลายตาราง", "ครามเข้ม"],
+        "signature_silhouette": "เสื้อเชิ้ตลายตาราง + ยีนส์ขายาว",
+        "signature_material_or_texture": "ผ้าทอลายตารางและเดนิม",
+        "recognition_cue": "เสื้อเชิ้ตลายตารางเขียว-ขาว + ยีนส์ครามเข้ม + รองเท้าผ้าใบ",
+        "avoid_overlap_with": ["kan", "mother", "uncle-thueang", "medium-phokae"]
+      },
+      "visual_identity": "ชายหนุ่มไทยผมดำ หน้าสี่เหลี่ยม แข็งแรงกว่ากัน", "evidence": ["พี่ชายกันในครอบครัว"], "assumptions": ["ชุดอนุมานเพื่อภาพ แตกต่างจากกันชัดเจน"]
+    },
+    {
       "character_id": "mother", "name": "แม่", "entity_type": "human", "needs_ref": true,
       "appearance": {"age": "หญิงวัยกลางคน", "gender": "หญิง", "body": "รูปร่างธรรมดา", "height": "ส่วนสูงปานกลาง", "skin": "ผิวสองสี", "hair": "ผมดำรวบเรียบ", "face": "ใบหน้าอ่อนล้าแบบแม่บ้าน", "eyes": "ตาสีน้ำตาล"},
       "occupation": "ดูแลบ้าน", "social_status": "ครอบครัวชาวบ้าน",
-      "wardrobe": {"top": "เสื้อผ้าฝ้ายเรียบสำหรับอยู่บ้าน", "bottom": "ผ้าถุงลายเรียบ", "footwear": "รองเท้าแตะในบ้าน", "outerwear": "ไม่มี", "accessories": "ไม่มี", "colors": "น้ำตาลหม่นและครีม", "materials": "ผ้าฝ้าย", "condition": "ใช้งานประจำวัน", "overall_style": "หญิงวัยกลางคนอยู่บ้านในชนบท", "source": "inferred", "reason": "อิงบทบาทแม่ที่อยู่บ้านและบริบทครอบครัว"},
-      "visual_identity": "หญิงไทยวัยกลางคน ผมรวบ ใบหน้าอ่อนล้าแต่ใจดี", "evidence": ["แม่อยู่ในบริบทบ้านและครอบครัว"], "assumptions": ["รายละเอียดชุดสมมุติเพื่อภาพ"]
+      "wardrobe": {
+        "top": "เสื้อแขนสั้นผ้าฝ้ายลายดอกเล็กสีชมพูอ่อน",
+        "bottom": "ผ้าถุงลายตารางสีน้ำเงินเข้มและแดงหม่น",
+        "footwear": "รองเท้าแตะพลาสติกสีน้ำเงิน",
+        "outerwear": "ไม่มี",
+        "accessories": "ผ้าขาวม้าพาดบ่า",
+        "colors": "ชมพูอ่อนลายดอกและน้ำเงินเข้ม",
+        "materials": "ผ้าฝ้ายทอมือ",
+        "condition": "สะอาดแต่ซักบ่อยจนสีจางลง",
+        "overall_style": "หญิงวัยกลางคนอยู่บ้านในชนบท",
+        "source": "inferred",
+        "reason": "แม่บ้านชาวบ้านชนบทไทย พ.ศ. 2540 ชุดผ้าถุงตามวิถีประจำวัน"
+      },
+      "costume_identity": {
+        "signature_palette": ["ชมพูอ่อน", "น้ำเงินเข้ม"],
+        "signature_silhouette": "เสื้อแขนสั้นหลวม + ผ้าถุงยาวถึงข้อเท้า",
+        "signature_material_or_texture": "ผ้าฝ้ายทอมือลายดอกเล็กและลายตาราง",
+        "recognition_cue": "ผ้าถุงลายตารางสีน้ำเงิน + เสื้อลายดอกชมพูอ่อน + ผ้าขาวม้าพาดบ่า",
+        "avoid_overlap_with": ["kan", "pee-chai", "uncle-thueang", "medium-phokae"]
+      },
+      "visual_identity": "หญิงไทยวัยกลางคน ผมรวบ ใบหน้าอ่อนล้าแต่ใจดี", "evidence": ["แม่อยู่ในบริบทบ้านและครอบครัว"], "assumptions": ["รายละเอียดชุดอนุมานเพื่อภาพ"]
     },
     {
       "character_id": "uncle-thueang", "name": "ลุงเทือง", "entity_type": "human", "needs_ref": true,
       "appearance": {"age": "สูงวัย", "gender": "ชาย", "body": "ผอมสมส่วน", "height": "ส่วนสูงปานกลาง", "skin": "ผิวคล้ำแดด", "hair": "ผมหงอกสั้น", "face": "ใบหน้าสูงวัย", "eyes": "ตาสีน้ำตาลเข้ม"},
       "occupation": "มัคนายก", "social_status": "ผู้ใหญ่ในชุมชน",
-      "wardrobe": {"top": "เสื้อเชิ้ตสุภาพสีอ่อน", "bottom": "กางเกงขายาวสีเข้ม", "footwear": "รองเท้าแตะสุภาพ", "outerwear": "ไม่มี", "accessories": "ไม่มี", "colors": "ขาวหม่นและน้ำตาลเข้ม", "materials": "ผ้าฝ้าย", "condition": "สะอาดเรียบร้อย", "overall_style": "มัคนายกชุมชนชนบท", "source": "inferred", "reason": "อิงบทบาทมัคนายกและบริบทชุมชน"},
-      "visual_identity": "ชายสูงวัยผมหงอก บุคลิกผู้ใหญ่ในชุมชน", "evidence": ["ลุงเทืองเป็นมัคนายก"], "assumptions": ["รายละเอียดชุดสมมุติเพื่อภาพ"]
+      "wardrobe": {
+        "top": "เสื้อเชิ้ตผ้าฝ้ายสีขาวนวล แขนยาวพับถึงข้อมือ",
+        "bottom": "กางเกงขายาวผ้าโทเรสีดำ",
+        "footwear": "รองเท้าหนังแก้วสีน้ำตาลเก่า",
+        "outerwear": "ไม่มี",
+        "accessories": "ไม่มี",
+        "colors": "ขาวนวลและดำ",
+        "materials": "ผ้าฝ้ายและโทเร",
+        "condition": "สะอาดเรียบร้อย สมศักดิ์ศรีผู้ใหญ่ในชุมชน",
+        "overall_style": "มัคนายกชุมชนชนบท บุคลิกสุภาพมีศักดิ์ศรี",
+        "source": "inferred",
+        "reason": "มัคนายกวัยสูงอาวุโส ชุดสุภาพแสดงตำแหน่งในชุมชนวัด"
+      },
+      "costume_identity": {
+        "signature_palette": ["ขาวนวล", "ดำ"],
+        "signature_silhouette": "เสื้อเชิ้ตแขนยาวพับ + กางเกงขายาวสีดำ",
+        "signature_material_or_texture": "ผ้าฝ้ายเชิ้ตสีเดียวทับโทเรดำ ไม่มีลาย",
+        "recognition_cue": "เสื้อเชิ้ตขาวนวลแขนยาวพับ + กางเกงดำ + รองเท้าหนังเก่า",
+        "avoid_overlap_with": ["kan", "pee-chai", "medium-phokae"]
+      },
+      "visual_identity": "ชายสูงวัยผมหงอก บุคลิกผู้ใหญ่ในชุมชน", "evidence": ["ลุงเทืองเป็นมัคนายก"], "assumptions": ["รายละเอียดชุดอนุมานเพื่อภาพ"]
     },
     {
       "character_id": "medium-phokae", "name": "ร่างทรงพ่อแก่", "entity_type": "human", "needs_ref": true,
       "appearance": {"age": "วัยกลางคน", "gender": "ชาย", "body": "ผอม", "height": "ส่วนสูงปานกลาง", "skin": "ผิวสองสี", "hair": "ผมดำแซมหงอก", "face": "ใบหน้าคมเคร่ง", "eyes": "สายตาคม"},
       "occupation": "ร่างทรง", "social_status": "ผู้ทำพิธีในชุมชน",
-      "wardrobe": {"top": "เสื้อพิธีสีขาวเรียบ", "bottom": "กางเกงผ้าสีขาว", "footwear": "เท้าเปล่าระหว่างพิธี", "outerwear": "ไม่มี", "accessories": "ผ้าคาดเอวพิธี", "colors": "ขาวและแดงหม่น", "materials": "ผ้าฝ้าย", "condition": "ชุดพิธีที่ใช้งานจริง", "overall_style": "เครื่องแต่งกายร่างทรงตามพิธี", "source": "inferred", "reason": "อิงบทบาทร่างทรงและสถานการณ์ประกอบพิธี"},
-      "visual_identity": "ชายวัยกลางคนหน้าคมเคร่ง มีบุคลิกของผู้ประกอบพิธี", "evidence": ["ตัวละครเป็นร่างทรงพ่อแก่"], "assumptions": ["รายละเอียดชุดพิธีสมมุติเพื่อภาพ"]
+      "wardrobe": {
+        "top": "เสื้อพิธีคอจีนสีขาวบริสุทธิ์มีขลิบแดงที่คอและชายเสื้อ",
+        "bottom": "กางเกงผ้าขาวทรงตรงขายาว",
+        "footwear": "เท้าเปล่าระหว่างพิธี",
+        "outerwear": "ไม่มี",
+        "accessories": "ผ้าสไบสีแดงเข้มคล้องบ่าซ้าย สายลูกประคำไม้สีดำคาดเอว",
+        "colors": "ขาวบริสุทธิ์และแดงเข้ม",
+        "materials": "ผ้าฝ้ายพิธีกรรม",
+        "condition": "สะอาดพิถีพิถันตามประเพณีพิธี",
+        "overall_style": "เครื่องแต่งกายร่างทรงพื้นบ้านไทย พิธีกรรมชุมชน",
+        "source": "inferred",
+        "reason": "ร่างทรงพ่อแก่ สวมชุดพิธีแบบโบราณตามประเพณีชนบทไทย"
+      },
+      "costume_identity": {
+        "signature_palette": ["ขาวบริสุทธิ์", "แดงเข้ม"],
+        "signature_silhouette": "เสื้อคอจีนแขนสั้น + กางเกงขาวยาว + สไบแดงพาดบ่า",
+        "signature_material_or_texture": "ผ้าฝ้ายพิธีสีล้วน + สไบแดงสด",
+        "recognition_cue": "สไบแดงเข้มคล้องบ่าซ้าย + เสื้อคอจีนขาวขลิบแดง + เท้าเปล่า",
+        "avoid_overlap_with": ["kan", "pee-chai", "uncle-thueang", "mother"]
+      },
+      "visual_identity": "ชายวัยกลางคนหน้าคมเคร่ง มีบุคลิกของผู้ประกอบพิธี", "evidence": ["ตัวละครเป็นร่างทรงพ่อแก่"], "assumptions": ["รายละเอียดชุดพิธีอนุมานเพื่อภาพ"]
     }
   ],
   "animals": [

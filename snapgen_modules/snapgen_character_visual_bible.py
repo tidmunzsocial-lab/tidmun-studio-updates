@@ -107,6 +107,9 @@ def canonicalize_character(character, default_entity_type="human"):
     if entity_type.casefold() in {"animal", "animal_group", "supernatural_unknown", "supernatural", "supernatural_entity", "ghost", "spirit"}:
         if wardrobe and not any(has_value(wardrobe.get(k)) for k in WARDROBE_FIELDS):
             wardrobe = None
+        out_costume_identity = None
+    else:
+        out_costume_identity = deepcopy(raw.get("costume_identity")) if isinstance(raw.get("costume_identity"), dict) else None
 
     out = {}
     for key, value in raw.items():
@@ -121,6 +124,7 @@ def canonicalize_character(character, default_entity_type="human"):
     out["wardrobe"] = wardrobe
     out["occupation"] = deepcopy(raw.get("occupation") if has_value(raw.get("occupation")) else raw.get("อาชีพ") or "")
     out["social_status"] = deepcopy(raw.get("social_status") if has_value(raw.get("social_status")) else raw.get("ฐานะ") or "")
+    out["costume_identity"] = out_costume_identity
     out["visual_identity"] = deepcopy(raw.get("visual_identity") or "")
     out["evidence"] = deepcopy(raw.get("evidence") if isinstance(raw.get("evidence"), list) else [])
     out["assumptions"] = deepcopy(raw.get("assumptions") if isinstance(raw.get("assumptions"), list) else [])
@@ -266,6 +270,7 @@ def canonical_schema_text():
         '"needs_ref":true,"appearance":{"age":"","gender":"","body":"","height":"","skin":"","hair":"","face":"","eyes":""},'
         '"occupation":"","social_status":"","wardrobe":{"top":"","bottom":"","footwear":"","outerwear":"","accessories":"",'
         '"colors":"","materials":"","condition":"","overall_style":"","source":"explicit|inferred","reason":""},'
+        '"costume_identity":{"signature_palette":["",""],"signature_silhouette":"","signature_material_or_texture":"","recognition_cue":"","avoid_overlap_with":["character_id"]},'
         '"visual_identity":"","evidence":[],"assumptions":[]}. '
-        'animal/supernatural ที่ไม่มีเสื้อผ้าจริงให้ wardrobe=null; ห้ามสร้าง alias ภาษาไทยซ้ำกับ canonical fields.'
+        'animal/supernatural ที่ไม่มีเสื้อผ้าจริงให้ wardrobe=null และ costume_identity=null; ห้ามสร้าง alias ภาษาไทยซ้ำกับ canonical fields.'
     )

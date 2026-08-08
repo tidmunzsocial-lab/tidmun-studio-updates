@@ -75,6 +75,8 @@ def save_debug_snapshot(base, character, prompt):
         "character_id": _flatten(character.get("character_id")),
         "character_name": _flatten(character.get("name")),
         "canonical_character": deepcopy(character),
+        "canonical_wardrobe": deepcopy(character.get("wardrobe")),
+        "costume_identity": deepcopy(character.get("costume_identity")),
         "final_ref_prompt": str(prompt or ""),
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
     }

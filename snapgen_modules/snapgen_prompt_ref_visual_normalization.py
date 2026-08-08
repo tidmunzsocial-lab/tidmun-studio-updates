@@ -23,9 +23,17 @@ def _quality_rules():
         "ถ้าบทไม่ระบุ ให้ infer อย่างสมเหตุผลจากยุค ประเทศ/วัฒนธรรม สถานที่ อายุ อาชีพ ฐานะ บทบาท และเหตุการณ์ แล้วใส่เหตุผลใน assumptions/wardrobe.reason. "
         "wardrobe.source ต้องเป็น explicit เมื่อบทระบุจริง หรือ inferred เมื่อสมมุติเพื่อภาพ. "
         "ห้ามใช้ alias ภาษาไทยซ้ำกับ canonical fields; ใช้ appearance.age/gender/body/height/skin/hair/face/eyes และ wardrobe.top/bottom/footwear/outerwear/accessories/colors/materials/condition/overall_style/source/reason เท่านั้น. "
-        "animal หรือ supernatural ที่ไม่ได้ใส่เสื้อผ้าจริงให้ wardrobe=null. "
+        "animal หรือ supernatural ที่ไม่ได้ใส่เสื้อผ้าจริงให้ wardrobe=null และ costume_identity=null. "
         "character_id ต้องคงที่และไม่ซ้ำ; ใช้ชื่อเดิมจากบทได้เมื่อไม่มี id อื่น. "
         "evidence เก็บเฉพาะข้อเท็จจริงจากบท; assumptions เก็บสิ่งที่ infer. "
+        "COSTUME DESIGNER RULE: wardrobe แต่ละตัวละครต้องสะท้อน identity เฉพาะของตัวเอง — "
+        "ระบุสีจริง (เช่น กรมท่าซีด ชมพูอ่อน ขาวนวล) วัสดุจริง (เช่น ผ้าฝ้ายบาง เดนิม โทเร) ทรงจริง — "
+        "ห้ามตอบ 'สีหม่น' 'วัสดุที่หาได้ในยุค' 'เสื้อผ้าที่เหมาะกับตัวละคร' หรือ template กลางๆ. "
+        "CROSS-CHARACTER: ก่อน finalize เปรียบเทียบ human characters ทั้งหมด — "
+        "ห้ามให้ 2 ตัวละครหลักมี signature_palette/top/silhouette เดียวกัน; ทุกคนต้องจำแนกกันได้จาก full-body shot. "
+        "COSTUME_IDENTITY REQUIRED สำหรับ human ที่ needs_ref=true: "
+        "costume_identity.signature_palette=[\"สีหลัก\",\"สีรอง\"], signature_silhouette=\"ทรงเสื้อ+กางเกง/กระโปรง\", "
+        "signature_material_or_texture=\"วัสดุ\", recognition_cue=\"visual marker ที่จำได้ทันที\", avoid_overlap_with=[\"character_id อื่น\"]. "
     )
 
 
@@ -66,6 +74,10 @@ def install_prompt_ref_visual_normalization(g):
                 "ห้าม regenerate character object, ห้ามแก้ field ที่มีข้อมูลอยู่แล้ว, ห้ามเปลี่ยน character_id/name/entity_type/needs_ref. "
                 "ตอบ JSON object รูปแบบ {\"repairs\":[{\"character_id\":\"...\", ...เฉพาะ field ที่ขาด...}]} เท่านั้น. "
                 "ถ้าต้อง infer ให้ใส่ค่า inferred และเหตุผลใน assumptions หรือ wardrobe.reason โดยไม่แตะ evidence เดิม. "
+                "WARDROBE SPECIFICITY: ระบุสีจริง วัสดุจริง ทรงจริง — ห้ามใช้ 'สีหม่น' 'วัสดุที่หาได้ในยุค' 'เหมาะกับตัวละคร'. "
+                "COSTUME_IDENTITY: ถ้า entity_type=human และ needs_ref=true ให้เพิ่ม costume_identity "
+                "{signature_palette, signature_silhouette, signature_material_or_texture, recognition_cue, avoid_overlap_with} "
+                "ที่ต่างจากตัวละครอื่นที่มีอยู่แล้วในเรื่อง. "
                 "canonical schema reference: " + canonical_schema_text()
                 + "\nMISSING_TARGETS:\n" + json.dumps(targets, ensure_ascii=False)
             )
