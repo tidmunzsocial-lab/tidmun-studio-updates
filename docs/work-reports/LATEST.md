@@ -1,19 +1,17 @@
 # Latest Work Report
 
-Current task: Wardrobe entity-aware normalization for Character Reference
+Current task: Prompt-Ref Visual Bible alias normalization
 
 Status: completed
 
 Full work report:
-- `docs/work-reports/2026-08-08_wardrobe-entity-aware-normalization.md`
+- `docs/work-reports/2026-08-08_prompt-ref-visual-bible-alias-normalization.md`
 
 Key handoff:
-- Human explicit outfit strings are split into real top/bottom/footwear/etc fields.
-- Animal entities do not receive human wardrobe.
-- Supernatural entities receive wardrobe only when humanoid and explicit clothing is supported by story evidence.
-- Nested `wardrobe` is canonical; legacy top-level source/reason aliases are only maintained when already present.
-- Wardrobe inference uses character-owned context/role/evidence instead of blindly inheriting story main_location.
-- Character Ref locks the same normalized outfit across Front / 3/4 / Full-body and explicitly requires visible top/bottom/footwear/accessories in full-body.
-- New targeted wardrobe tests: 7/7 pass.
+- Prompt-Ref canonicalizes `ดวงต -> ดวงตา` and `เสื้อผ -> เสื้อผ้า` before Visual Bible validation.
+- Non-empty canonical data wins; typo aliases are removed from normalized output.
+- Audit/repair merge no longer lets empty repair values erase existing visual data.
+- Existing `needs_ref=false` behavior remains non-demanding; `needs_ref=true` validates canonical fields after normalization.
+- New Visual Bible normalization tests: 6/6 pass; combined with wardrobe tests: 13/13 pass.
 - Existing Prompt-Ref/Storyboard baseline remains 18 tests with 4 failures and 4 errors; no new regression.
-- Unrelated working-tree changes remain and must not be staged blindly.
+- `snapgen_gui_v2.py` still contains unrelated pre-existing uncommitted work and was intentionally not staged in this task.

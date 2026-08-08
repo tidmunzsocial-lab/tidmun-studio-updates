@@ -14,6 +14,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk as _ttk
 from snapgen_character_wardrobe import wardrobe_prompt_text
+from snapgen_prompt_ref_visual_normalization import install_prompt_ref_visual_normalization
 from snapgen_page_builder import (
     make_log_box as _builder_make_log_box,
     append_log as _builder_append_log,
@@ -27,6 +28,7 @@ from snapgen_page_builder import (
 def install(g: dict, root: tk.Misc) -> tk.Misc:
     """Build this page and return its root frame."""
     globals().update(g)
+    install_prompt_ref_visual_normalization(g)
     lock_g = {"_selection_locks": {}, "_selection_lock_vars": []}
     export_ref_dir = g.get("EXPORT_REF", BASE / "ref")
     ref_page = tk.Frame(root, bg="#FAFAF7")
