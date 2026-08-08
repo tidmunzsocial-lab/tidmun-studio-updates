@@ -9,22 +9,117 @@ import os
 import json
 import re
 import shutil
+import sys
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk as _ttk
+from snapgen_fonts import font_family as _snapgen_font_family
 from snapgen_character_wardrobe import wardrobe_prompt_text
 from snapgen_character_ref_request import character_prompt_text, save_debug_snapshot
 from snapgen_character_visual_bible import canonicalize_context, find_character
 from snapgen_prompt_ref_visual_normalization import install_prompt_ref_visual_normalization
+
+SNAPGEN_UI_FONT = _snapgen_font_family()
 from snapgen_page_builder import (
     make_log_box as _builder_make_log_box,
     append_log as _builder_append_log,
-    make_selection_lock_bar as _builder_make_selection_lock_bar,
     set_selection_lock as _builder_set_selection_lock,
     set_selection_locks as _builder_set_selection_locks,
     remove_selection_lock as _builder_remove_selection_lock,
 )
+from snapgen_button_styles import STYLE
+
+
+def is_explicit_ghost_character(name, entity):
+    """Return True only when THIS entity is explicitly supernatural.
+
+    Mentions such as "ผู้พบเห็นเหตุการณ์แมวผี", "กลัวผี", or "ถูกผีหลอก"
+    describe the story around a normal character and must never convert that
+    character into a ghost reference.
+    """
+    import re as _re
+
+    # Story Breakdown v4 is authoritative. Do not reinterpret its semantic type
+    # from words inside role/description. Fallback logic below is only for old v3 data.
+    if isinstance(entity, dict):
+        entity_type = str(entity.get("entity_type") or entity.get("type") or "").strip().casefold()
+        if entity_type in {"human", "animal", "animal_group"}:
+            return False
+        if entity_type in {"supernatural_entity", "supernatural_unknown", "ghost", "spirit"}:
+            return True
+
+    ghost_words = (
+        "ผี", "วิญญาณ", "ภูต", "ปีศาจ", "อมนุษย์",
+        "ghost", "spirit", "specter", "spectre",
+    )
+    supernatural_phrases = ("สิ่งเหนือธรรมชาติ", "supernatural entity")
+
+    entity_name = str(name or "").strip().casefold()
+    # A supernatural identity stated directly in the entity name is explicit,
+    # e.g. ผีโพง, แมวผี, วิญญาณหญิง, ปีศาจ.
+    if any(word in entity_name for word in ghost_words):
+        return True
+    if any(phrase in entity_name for phrase in supernatural_phrases):
+        return True
+
+    if not isinstance(entity, dict):
+        return False
+
+    # Only identity-bearing fields are allowed to classify the entity.  Do not
+    # use assumptions, must_include, skin/hair/eyes/clothes: those can contain
+    # scene descriptions or words about another creature.
+    role = str(entity.get("บทบาท") or "").strip().casefold()
+    identity = str(entity.get("visual_identity") or "").strip().casefold()
+    traits = str(entity.get("ลักษณะเด่น") or "").strip().casefold()
+
+    # Explicit identity forms.  Requiring identity grammar prevents incidental
+    # phrases like "ผู้พบเห็นเหตุการณ์แมวผี" from becoming a ghost match.
+    strong_texts = (role, identity, traits)
+    explicit_patterns = (
+        r"^(?:เป็น\s*)?(?:ผี|วิญญาณ|ภูต|ปีศาจ|อมนุษย์)(?:\b|ที่|ชนิด|ตน|ตัว)",
+        r"^(?:เป็น\s*)?สิ่งเหนือธรรมชาติ(?:\b|ที่|ชนิด|ตน|ตัว)",
+        r"(?:เป็น|คือ|มีตัวตนเป็น|ตัวจริงเป็น|身份เป็น)\s*(?:ผี|วิญญาณ|ภูต|ปีศาจ|อมนุษย์)",
+        r"(?:เป็น|คือ|มีตัวตนเป็น|ตัวจริงเป็น)\s*สิ่งเหนือธรรมชาติ",
+        r"^(?:ghost|spirit|specter|spectre|supernatural entity)\b",
+        r"\b(?:is|as)\s+(?:a\s+)?(?:ghost|spirit|specter|spectre|supernatural entity)\b",
+    )
+    for text in strong_texts:
+        if not text:
+            continue
+        if any(_re.search(pattern, text, flags=_re.I) for pattern in explicit_patterns):
+            return True
+
+    return False
+
+
+GHOST_CINEMATIC_HORROR_EFFECTS = (
+    "ทำให้เห็นทันทีว่าเป็นผีไทยเหนือธรรมชาติ ไม่ใช่เพียงคนแก่ คนป่วย หรือคนสกปรก: "
+    "คงใบหน้าและตัวตนเดิม แต่เพิ่มผิวตายซีดเทาหม่นไม่สม่ำเสมอ เบ้าตาลึกคล้ำ "
+    "ดวงตาเย็นชาผิดธรรมชาติ เส้นเลือดหรือรอยยุบใต้ผิว และท่าทางนิ่งไร้ชีวิตอย่างชัดเจน. "
+    "เครื่องหมายเฉพาะตามคติของผีชนิดนั้นต้องเด่นและเป็นส่วนหนึ่งของร่างกายจริง "
+    "ไม่ใช่หลอดไฟ LED สติ๊กเกอร์ เครื่องประดับ หรือแสงที่แปะบนผิว. "
+    "ให้สมจริงแบบ practical supernatural horror makeup รายละเอียดผิวชัด แต่ไม่ใช้ gore. "
+    "REFERENCE LIGHTING LOCK: พื้นหลังขาวล้วน high-key studio แสงขาวนุ่มสม่ำเสมอจากด้านหน้าและรอบทิศ "
+    "เห็นรายละเอียดผม ใบหน้า เสื้อผ้า และรูปร่างชัด ไม่มีฉากมืด ไม่มีเงาดำ ไม่มีหมอก ไม่มีกลางคืน"
+)
+
+
+def build_ref_edit_prompt(comment, ghost=True):
+    prompt = (
+        "แก้ไข CHARACTER REFERENCE SHEET ที่แนบมาในประวัติ Ref เดิม. "
+        "รักษาตัวละครเดิม ใบหน้าเดิม อายุเดิม ชนิดผีเดิม เครื่องหมายจำเพาะเดิม "
+        "ทรงผม เสื้อผ้า รูปร่าง การแบ่งช่อง และมุมกล้องเดิมทั้งหมด. "
+        "ห้ามเปลี่ยนเป็นตัวละครใหม่และห้ามเปลี่ยนชนิดผี. "
+        "เปลี่ยนพื้นหลังทุกช่องเป็นขาวล้วน ใช้ high-key studio lighting แสงขาวนุ่มสม่ำเสมอ ให้เห็นรายละเอียดผม ใบหน้า เสื้อผ้า และรูปร่างชัด. "
+        "ลบหัวเรื่อง NOTE ป้ายชื่อ คำอธิบาย และตัวอักษรทั้งหมดออกจากภาพ เพราะโปรแกรมจะเติมชื่อภายหลัง. "
+        "ห้ามพื้นดำ ฉากกลางคืน หมอก ควัน วิวสถานที่ หรือแสงมืด. "
+        "เพิ่มความน่ากลัวด้วยสีหน้า ดวงตา ผิว ท่าทาง และลักษณะเหนือธรรมชาติแบบสมจริงได้. "
+    )
+    if ghost:
+        prompt += GHOST_CINEMATIC_HORROR_EFFECTS + ". "
+    return prompt + "เปลี่ยนเฉพาะตามคำสั่งผู้ใช้ต่อไปนี้: " + str(comment or "").strip()
 
 
 def install(g: dict, root: tk.Misc) -> tk.Misc:
@@ -56,14 +151,129 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     
     box = tk.LabelFrame(ref_page, text="🎭 Ref", bg="#FAFAF7", fg="#1A1A1A", padx=10, pady=8)
     box.pack(fill="x", padx=10, pady=10)
+    # Fixed pixel geometry keeps every form row on one exact vertical axis.
+    # Character-based Label/Entry widths vary with bold text and Windows DPI.
+    FORM_LABEL_WIDTH = 46
+    FORM_FIELD_WIDTH = 300
+    FORM_FIELD_HEIGHT = 34
+
+    def _form_label(parent, text, *, bold=False):
+        host = tk.Frame(parent, width=FORM_LABEL_WIDTH, height=FORM_FIELD_HEIGHT, bg="#FAFAF7")
+        host.pack(side="left")
+        host.pack_propagate(False)
+        tk.Label(
+            host, text=text, anchor="e", bg="#FAFAF7", fg="#111" if bold else "#333",
+            font=(SNAPGEN_UI_FONT, 9, "bold" if bold else "normal"),
+        ).pack(fill="both", expand=True)
+        return host
+
+    story_row = tk.Frame(box, bg="#FAFAF7")
+    story_row.pack(fill="x", pady=(0, 6))
+    get_ref_story_title = g.get("get_ref_story_title")
+    ref_story_title_var = tk.StringVar(
+        value=(get_ref_story_title() if callable(get_ref_story_title) else "")
+    )
+    ref_story_status_var = tk.StringVar(value="")
+    ref_story_sending = [False]
+    _form_label(story_row, "เรื่อง:", bold=True)
+    story_title_box = tk.Frame(
+        story_row, width=FORM_FIELD_WIDTH, height=FORM_FIELD_HEIGHT,
+        bg="#FFFFFF", highlightthickness=1, highlightbackground="#111111",
+    )
+    story_title_box.pack(side="left", padx=(6, 8))
+    story_title_box.pack_propagate(False)
+    tk.Label(story_title_box, textvariable=ref_story_title_var, anchor="w",
+             bg="#FFFFFF", fg="#111", padx=7).pack(fill="both", expand=True)
+    tk.Label(story_row, textvariable=ref_story_status_var, bg="#FAFAF7",
+             fg="#6B7280").pack(side="left", padx=(0, 8))
+
+    def _prompt_ref_story_title():
+        try:
+            for line in (Path(BASE) / "prompt_ref_source.txt").read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.strip():
+                    return line.strip()[:60]
+        except OSError:
+            pass
+        context_path = Path(BASE) / "prompt_ref_context.json"
+        try:
+            data = json.loads(context_path.read_text(encoding="utf-8"))
+            story = data.get("story") if isinstance(data, dict) else {}
+            for value in (story.get("title"), story.get("name"), data.get("title")):
+                if isinstance(value, str) and value.strip():
+                    return value.strip()[:60]
+        except Exception:
+            pass
+        return "เรื่องจาก Prompt-Ref"
+
+    def _start_ref_story_history():
+        if ref_story_sending[0]:
+            return
+        source_path = Path(BASE) / "prompt_ref_source.txt"
+        try:
+            content = source_path.read_bytes()
+            if not content.strip():
+                raise RuntimeError("ไฟล์บทว่าง")
+        except Exception as exc:
+            ref_story_title_var.set("")
+            _ref_log(f"[บทเรื่อง] ยังส่งไม่ได้: {exc}")
+            return
+        reset = g.get("reset_ref_story_history")
+        if callable(reset):
+            reset()
+        ref_story_title_var.set("")
+        ref_story_status_var.set("กำลังส่งบท...")
+        ref_story_sending[0] = True
+        title = _prompt_ref_story_title()
+
+        def worker():
+            error = None
+            try:
+                ingest = g.get("ingest_ref_story_file")
+                if not callable(ingest):
+                    raise RuntimeError("ยังไม่มีระบบประวัติ Ref")
+                ingest(title, source_path.name, content,
+                       log_fn=lambda message: root.after(0, lambda m=message: _ref_log(m)))
+            except Exception as exc:
+                error = str(exc)
+
+            def finish():
+                ref_story_sending[0] = False
+                if error:
+                    ref_story_title_var.set("")
+                    ref_story_status_var.set("ส่งบทไม่สำเร็จ")
+                    _ref_log("[บทเรื่อง] " + error)
+                else:
+                    getter = g.get("get_ref_story_title")
+                    ref_story_title_var.set(getter() if callable(getter) else title)
+                    ref_story_status_var.set("")
+                    _ref_log("[บทเรื่อง] Ref พร้อมใช้ประวัติเรื่องนี้")
+            root.after(0, finish)
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    ref_story_btn = tk.Button(
+        story_row, text="เริ่มประวัติใหม่", command=_start_ref_story_history,
+        bg=STYLE.HISTORY.bg, fg=STYLE.HISTORY.fg,
+        activebackground=STYLE.HISTORY.active_bg, activeforeground=STYLE.HISTORY.active_fg,
+        relief="flat", bd=0, highlightthickness=1,
+        highlightbackground="#BFDBFE", highlightcolor="#93C5FD",
+        padx=14, pady=7, width=14, height=1,
+        font=(SNAPGEN_UI_FONT, 9, "bold"),
+    )
+    ref_story_btn.pack(side="right")
+    g["ref_story_title_var"] = ref_story_title_var
+    g["start_ref_story_history"] = _start_ref_story_history
+
     row = tk.Frame(box, bg="#FAFAF7")
-    row.pack(fill="x")
-    tk.Label(row, text="ชื่อ:", bg="#FAFAF7", fg="#333").pack(side="left")
-    entry_wrap = tk.Frame(row, bg="#FFFFFF", highlightthickness=1, highlightbackground="#D1D5DB")
-    entry_wrap.pack(side="left", fill="x", expand=True, padx=6)
+    row.pack(fill="x", pady=(0, 6))
+    _form_label(row, "ชื่อ:")
+    entry_wrap = tk.Frame(row, width=FORM_FIELD_WIDTH, height=FORM_FIELD_HEIGHT, bg="#FFFFFF", highlightthickness=1, highlightbackground="#D1D5DB")
+    entry_wrap.pack(side="left", padx=(6, 8))
+    entry_wrap.pack_propagate(False)
     entry = tk.Entry(entry_wrap, textvariable=ref_name_var, relief="flat", bg="#FFFFFF", fg="#111")
     entry.pack(fill="x", padx=8, pady=6)
-    placeholder = tk.Label(entry_wrap, text="ใส่ชื่อ", bg="#FFFFFF", fg="#B0B0B0", font=("Leelawadee UI", 9))
+    placeholder = tk.Label(entry_wrap, text="ใส่ชื่อ", bg="#FFFFFF", fg="#B0B0B0", font=(SNAPGEN_UI_FONT, 9))
     placeholder.place(x=10, y=6)
     def _sync_placeholder(*_):
         try:
@@ -98,7 +308,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         row, text="ใช้ Context", variable=ref_use_context_var,
         bg="#FAFAF7", activebackground="#FAFAF7", fg="#374151",
         selectcolor="#FFFFFF", bd=0, highlightthickness=0,
-        font=("Leelawadee UI", 9),
+        font=(SNAPGEN_UI_FONT, 9),
     ).pack(side="left", padx=(8, 4))
     
     # Select button — opens character/location list from prompt_ref_context.json.
@@ -120,7 +330,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 "อายุ", "เพศ", "บทบาท", "รูปร่าง", "ส่วนสูง", "สีผิว",
                 "ทรงผม", "ใบหน้า", "ดวงตา", "ดวงต", "เสื้อผ้า",
                 "visual_identity", "ลักษณะเด่น", "อาชีพ", "ฐานะ", "nationality_or_ethnicity",
-                "wardrobe", "wardrobe_source", "wardrobe_reason",
+                "wardrobe", "wardrobe_source", "wardrobe_reason", "must_include",
+                "must_not_include", "assumptions",
             ):
                 value = item.get(key)
                 if value is not None and str(value).strip() and str(value).strip() != "ไม่ระบุ":
@@ -265,7 +476,18 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             add_place(name, detail)
         try:
             locked_items = []
-            for target in (_load_location_bible().get("targets") or []):
+            location_bible = _load_location_bible()
+            # Only use cached targets if they belong to the current context.
+            # targets_hash is sha256(context+source); context_hash is sha256(context).
+            # Use context_hash as a fast check since we have context_text here.
+            current_ctx_hash = _location_context_hash(context_text)
+            bible_ctx_hash = location_bible.get("context_hash") or ""
+            bible_targets_hash = location_bible.get("targets_hash") or ""
+            # Accept if either hash matches (context_hash is subset, targets_hash is superset).
+            hash_ok = bible_ctx_hash == current_ctx_hash or bible_targets_hash.startswith(current_ctx_hash[:8])
+            if not hash_ok:
+                raise RuntimeError("location bible belongs to a different story — skip")
+            for target in (location_bible.get("targets") or []):
                 if isinstance(target, dict):
                     parent = str(target.get("parent_location") or "").strip()
                     fact = str(target.get("story_fact") or "").strip()
@@ -333,16 +555,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         selector.configure(bg="#FAFAF7")
         selector.resizable(False, False)
         selector.transient(root)
-        tk.Label(selector, text="เลือกตัวละคร / สถานที่", bg="#FAFAF7", fg="#111", font=("Leelawadee UI", 11, "bold")).pack(fill="x", padx=14, pady=(12, 6))
+        tk.Label(selector, text="เลือกตัวละคร / สถานที่", bg="#FAFAF7", fg="#111", font=(SNAPGEN_UI_FONT, 11, "bold")).pack(fill="x", padx=14, pady=(12, 6))
         if characters:
-            tk.Label(selector, text="ตัวละคร", bg="#FAFAF7", fg="#6B7280", font=("Leelawadee UI", 9, "bold")).pack(fill="x", padx=14, pady=(2, 2))
+            tk.Label(selector, text="ตัวละคร", bg="#FAFAF7", fg="#6B7280", font=(SNAPGEN_UI_FONT, 9, "bold")).pack(fill="x", padx=14, pady=(2, 2))
         for character in characters:
             name = character["name"]
             summary = " · ".join(character.get(key, "") for key in ("อายุ", "สีผิว", "ทรงผม") if character.get(key))
             label = name + (f"  —  {summary}" if summary else "")
             tk.Button(selector, text=label, anchor="w", command=lambda c=character: _apply_ref_character(c, selector), bg="#FFFFFF", fg="#111", activebackground="#E0E7FF", activeforeground="#111", relief="flat", bd=0, padx=12, pady=8).pack(fill="x", padx=12, pady=3)
         if locations:
-            tk.Label(selector, text="สถานที่", bg="#FAFAF7", fg="#6B7280", font=("Leelawadee UI", 9, "bold")).pack(fill="x", padx=14, pady=(8 if characters else 2, 2))
+            tk.Label(selector, text="สถานที่", bg="#FAFAF7", fg="#6B7280", font=(SNAPGEN_UI_FONT, 9, "bold")).pack(fill="x", padx=14, pady=(8 if characters else 2, 2))
         for location in locations:
             name = location["name"]
             detail = str(location.get("detail", "")).strip()
@@ -387,18 +609,22 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         "กำหนดชุดเอง",
     )
     outfit_frame = tk.Frame(box, bg="#FAFAF7")
-    # Story-only workflow: wardrobe is automatic; legacy controls stay internal but hidden.
+    # Story-only workflow: wardrobe is automatic; keep legacy state internal but hide manual wardrobe controls.
     ref_outfit_var.set("อัตโนมัติตามเนื้อเรื่อง")
-    tk.Label(outfit_frame, text="ชุด:", bg="#FAFAF7", fg="#333", font=("Leelawadee UI", 9)).pack(side="left")
+    _form_label(outfit_frame, "ชุด:")
+    outfit_combo_box = tk.Frame(
+        outfit_frame, width=FORM_FIELD_WIDTH, height=FORM_FIELD_HEIGHT, bg="#FAFAF7"
+    )
+    outfit_combo_box.pack(side="left", padx=(6, 8))
+    outfit_combo_box.pack_propagate(False)
     ref_outfit_combo = _ttk.Combobox(
-        outfit_frame,
+        outfit_combo_box,
         textvariable=ref_outfit_var,
         values=outfit_options,
         state="readonly",
-        width=28,
-        font=("Leelawadee UI", 9),
+        font=(SNAPGEN_UI_FONT, 9),
     )
-    ref_outfit_combo.pack(side="left", padx=(8, 6), ipady=3)
+    ref_outfit_combo.pack(fill="both", expand=True)
     custom_outfit_entry = tk.Entry(
         outfit_frame,
         textvariable=ref_custom_outfit_var,
@@ -406,7 +632,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         fg="#111111",
         relief="solid",
         bd=1,
-        font=("Leelawadee UI", 9),
+        font=(SNAPGEN_UI_FONT, 9),
     )
 
     def _sync_outfit_selector(_event=None):
@@ -440,7 +666,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     ref_attach_last_paste = {"sig": None, "time": 0.0}
     g["ref_attach_path"] = ref_attach_path
     ref_attach_frame = tk.Frame(box, bg="#FAFAF7")
-    ref_attach_frame.pack(fill="x", pady=(6, 0))
+    ref_attach_frame.pack(fill="x", padx=(FORM_LABEL_WIDTH + 6, 0), pady=(0, 6))
     ref_attach_thumb = tk.Label(
         ref_attach_frame, text="วางรูป / เลือกไฟล์", bg="#FFFFFF", fg="#6B7280",
         width=18, height=6, relief="solid", bd=1, anchor="center",
@@ -531,21 +757,54 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         _builder_remove_selection_lock(lock_g, "reference", old_name)
         _ref_log("[ref-attach] ล้างรูปแนบ")
 
-    tk.Button(ref_attach_controls, text="📋 วางรูป", command=_paste_ref_attach, bg="#475569", fg="white", relief="flat", padx=12, pady=6, font=("Leelawadee UI", 9, "bold")).pack(side="left", padx=(0, 4))
-    tk.Button(ref_attach_controls, text="📎 เลือกไฟล์", command=_choose_ref_attach, bg="#475569", fg="white", relief="flat", padx=12, pady=6, font=("Leelawadee UI", 9, "bold")).pack(side="left", padx=4)
-    tk.Button(ref_attach_controls, text="ล้าง", command=_clear_ref_attach, bg="#DC2626", fg="white", relief="flat", padx=12, pady=6, font=("Leelawadee UI", 9, "bold")).pack(side="left", padx=4)
+    tk.Button(ref_attach_controls, text="📋 วางรูป", command=_paste_ref_attach, bg="#475569", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=(0, 4))
+    tk.Button(ref_attach_controls, text="📎 เลือกไฟล์", command=_choose_ref_attach, bg="#475569", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
+    tk.Button(ref_attach_controls, text="ล้าง", command=_clear_ref_attach, bg="#DC2626", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
+    tk.Button(ref_attach_controls, text="🧹 ล้างรูป", command=lambda: g.get("clear_ref_gallery")() if callable(g.get("clear_ref_gallery")) else None, bg="#DC2626", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
+
+    def _install_ref_image_drop():
+        try:
+            project_root = Path(__file__).resolve().parent.parent
+            vendor = project_root / "vendor"
+            if str(vendor) not in sys.path:
+                sys.path.insert(0, str(vendor))
+            from tkinterdnd2 import DND_FILES, TkinterDnD
+            TkinterDnD.require(root)
+            allowed = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+            def dropped(event):
+                files = root.tk.splitlist(event.data)
+                source = next((Path(item) for item in files if Path(item).suffix.lower() in allowed), None)
+                ref_attach_thumb.configure(highlightthickness=0)
+                if source is None or not source.is_file():
+                    _ref_log("[ลากรูป] รับเฉพาะไฟล์รูป PNG/JPG/WEBP/BMP")
+                else:
+                    _set_ref_attach(source)
+                    _ref_log(f"[ลากรูป] ใส่สล็อต Ref: {source.name}")
+                return event.action
+
+            ref_attach_thumb.drop_target_register(DND_FILES)
+            ref_attach_thumb.dnd_bind(
+                "<<DropEnter>>",
+                lambda event: (ref_attach_thumb.configure(highlightthickness=2, highlightbackground="#2563EB"), event.action)[1],
+            )
+            ref_attach_thumb.dnd_bind(
+                "<<DropLeave>>",
+                lambda event: (ref_attach_thumb.configure(highlightthickness=0), event.action)[1],
+            )
+            ref_attach_thumb.dnd_bind("<<Drop>>", dropped)
+        except Exception as exc:
+            _ref_log(f"[ลากรูป] เปิดใช้งานไม่ได้: {exc}")
+
+    _install_ref_image_drop()
     g["ref_attach_preview_photo"] = ref_attach_preview_photo
     # ---
-    ref_select_btn = tk.Button(row, text="Select", command=_open_ref_selector, bg="#2563EB", fg="white", activebackground="#1D4ED8", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=("Leelawadee UI", 9, "bold"))
+    ref_select_btn = tk.Button(row, text="Select", command=_open_ref_selector, bg="#2563EB", fg="white", activebackground="#1D4ED8", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold"))
     g["ref_select_btn"] = ref_select_btn
     g["_open_ref_selector"] = _open_ref_selector
     g["_apply_ref_character"] = _apply_ref_character
     g["_apply_ref_location"] = _apply_ref_location
 
-    ref_lock_bar = _builder_make_selection_lock_bar(box, lock_g, bg="#FAFAF7")
-    ref_lock_bar.pack(fill="x", pady=(8, 0))
-    g["ref_lock_bar"] = ref_lock_bar
-    
     log = _builder_make_log_box(box)
     log.pack(fill="x", pady=(8, 0))
     g["ref_log_box"] = log
@@ -588,6 +847,29 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     g["ref_gallery_inner"] = gallery_inner
     ref_gallery_images = []  # keep Tk image refs alive
     g["ref_gallery_images"] = ref_gallery_images
+    ref_gallery_state_path = Path(BASE) / "meta" / "ref_gallery.json"
+    ref_gallery_paths = []
+    ref_gallery_cards = []
+
+    def _save_ref_gallery():
+        ref_gallery_state_path.parent.mkdir(parents=True, exist_ok=True)
+        ref_gallery_state_path.write_text(
+            json.dumps({"paths": ref_gallery_paths}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _relayout_ref_gallery():
+        for item in ref_gallery_cards:
+            try:
+                item.pack_forget()
+                item.pack(fill="x", pady=2)
+            except Exception:
+                pass
+        try:
+            gallery_canvas.yview_moveto(0)
+            root.after_idle(_rg_sync)
+        except Exception:
+            pass
 
     def _rg_sync(_e=None):
         gallery_canvas.configure(scrollregion=gallery_canvas.bbox("all") or (0, 0, 0, 0))
@@ -623,8 +905,77 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     gallery_canvas.bind("<Configure>", _rg_sync)
     for _w in (gallery, gallery_canvas, gallery_inner, gallery_scroll):
         _rg_bind_wheel(_w)
-    
-    def _ref_gallery_add(path, prepend=True):
+
+    def _normalize_ref_output(path, name):
+        """Add a small deterministic name badge at the lower-left corner.
+
+        Do not crop, resize, rearrange, or add a full-width strip. The generated
+        horizontal reference-sheet composition must remain untouched.
+        """
+        source = Path(str(path or ""))
+        if not source.is_file():
+            return str(path)
+        try:
+            from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
+
+            with Image.open(source) as opened:
+                if opened.info.get("snapgen_ref_layout") == "v3_horizontal_corner_label":
+                    return str(source)
+                image = opened.convert("RGB")
+            width, height = image.size
+            if width < 400 or height < 250:
+                return str(source)
+
+            canvas = image.copy()
+            draw = ImageDraw.Draw(canvas)
+            font = None
+            for font_path in (
+                Path(r"C:\Windows\Fonts\LeelawUI.ttf"),
+                Path(r"C:\Windows\Fonts\tahoma.ttf"),
+                Path(r"C:\Windows\Fonts\segoeui.ttf"),
+            ):
+                if font_path.is_file():
+                    try:
+                        font = ImageFont.truetype(str(font_path), max(18, round(height * 0.032)))
+                        break
+                    except Exception:
+                        pass
+            if font is None:
+                font = ImageFont.load_default()
+
+            label = " ".join(str(name or "").split()).strip() or source.stem
+            label = f"ชื่อ: {label}"
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            pad_x = max(12, round(width * 0.010))
+            pad_y = max(8, round(height * 0.010))
+            margin = max(12, round(min(width, height) * 0.018))
+            x0 = margin
+            y0 = height - margin - text_h - pad_y * 2
+            x1 = x0 + text_w + pad_x * 2
+            y1 = height - margin
+            draw.rectangle((x0, y0, x1, y1), fill="#F3F4F6", outline="#D1D5DB", width=max(1, round(height * 0.002)))
+            draw.text((x0 + pad_x, y0 + pad_y - bbox[1]), label, fill="#111827", font=font)
+
+            temp = source.with_suffix(source.suffix + ".refnorm.tmp")
+            if source.suffix.lower() == ".png":
+                metadata = PngImagePlugin.PngInfo()
+                metadata.add_text("snapgen_ref_layout", "v3_horizontal_corner_label")
+                canvas.save(temp, format="PNG", pnginfo=metadata)
+            else:
+                canvas.save(temp, format="PNG")
+            os.replace(str(temp), str(source))
+            return str(source)
+        except Exception as exc:
+            _ref_log(f"[Ref layout] ใส่ป้ายชื่อมุมล่างไม่สำเร็จ ใช้รูปเดิม: {exc}")
+            return str(path)
+
+    def _ref_gallery_add(path, prepend=True, is_ghost=False, persist=True):
+        path = str(Path(path))
+        if persist and path not in ref_gallery_paths:
+            ref_gallery_paths.insert(0 if prepend else len(ref_gallery_paths), path)
+            _save_ref_gallery()
         card = tk.Frame(gallery_inner, bg="#FFFFFF", highlightthickness=1, highlightbackground="#E5E7EB")
         thumb_box = tk.Frame(card, bg="#FFFFFF", width=96, height=96)
         thumb_box.pack(side="left", padx=6, pady=6)
@@ -638,9 +989,70 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             tk.Label(thumb_box, image=photo, bg="#FFFFFF").pack(expand=True)
         except Exception:
             tk.Label(thumb_box, text="ไม่มี preview", bg="#FFFFFF", fg="#9CA3AF", wraplength=80).pack(expand=True)
-        tk.Label(card, text=os.path.basename(path), bg="#FFFFFF", fg="#111", anchor="w").pack(side="left", fill="x", expand=True, padx=8, pady=6)
+        detail = tk.Frame(card, bg="#FFFFFF")
+        detail.pack(side="left", fill="both", expand=True, padx=8, pady=6)
+        tk.Label(detail, text=os.path.basename(path), bg="#FFFFFF", fg="#111", anchor="w").pack(fill="x")
+        comment_row = tk.Frame(detail, bg="#FFFFFF")
+        comment_row.pack(fill="x", pady=(6, 0))
+        comment_var = tk.StringVar()
+        comment_entry = tk.Entry(
+            comment_row, textvariable=comment_var, relief="solid", bd=1,
+            font=(SNAPGEN_UI_FONT, 9),
+        )
+        comment_entry.pack(side="left", fill="x", expand=True)
+
+        def _edit_ref_from_comment(p=path):
+            comment = comment_var.get().strip()
+            if not comment:
+                _ref_log("[แก้ Ref] พิมพ์สิ่งที่ต้องการแก้ก่อน")
+                return
+            if not Path(p).is_file():
+                _ref_log(f"[แก้ Ref] ไม่พบรูป: {p}")
+                return
+            comment_entry.config(state=tk.DISABLED)
+            edit_btn.config(state=tk.DISABLED, text="กำลังแก้...")
+
+            def worker():
+                try:
+                    encoder = g.get("_encode_image_b64") or globals().get("_encode_image_b64")
+                    if not callable(encoder):
+                        raise RuntimeError("ไม่พบตัวเข้ารหัสรูป")
+                    prompt = build_ref_edit_prompt(comment, ghost=is_ghost)
+                    payload = {
+                        "model": "gpt-5-5", "prompt": prompt, "n": 1,
+                        "aspect_ratio": "1:1", "history_and_training_disabled": False,
+                        "images": [encoder(p)], "_use_ref_story_history": True,
+                    }
+                    out = g["_do_image_request"](
+                        payload, is_edit=True, prompt=prompt,
+                        name_hint=f"{Path(p).stem}_แก้ไข", raw_prompt=comment,
+                        output_dir=str(export_ref_dir),
+                    )
+                    out = _normalize_ref_output(out, str(g.get("_ref_selected_name") or Path(p).stem))
+                    root.after(0, lambda out=out: (
+                        _ref_gallery_add(str(out), True, is_ghost=is_ghost),
+                        _ref_log(f"[แก้ Ref] ✓ {out}"), _notify_done(),
+                    ))
+                except Exception as exc:
+                    root.after(0, lambda exc=exc: _ref_log(f"[แก้ Ref] ERROR: {exc}"))
+                finally:
+                    root.after(0, lambda: (
+                        comment_entry.config(state=tk.NORMAL),
+                        edit_btn.config(state=tk.NORMAL, text="ส่งแก้ไข"),
+                    ))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        edit_btn = tk.Button(
+            comment_row, text="ส่งแก้ไข", command=_edit_ref_from_comment,
+            bg="#059669", activebackground="#10B981", fg="white",
+            relief="flat", font=(SNAPGEN_UI_FONT, 8, "bold"),
+        )
+        edit_btn.pack(side="left", padx=(4, 0))
+        comment_entry.bind("<Return>", lambda _event: _edit_ref_from_comment(), add="+")
         tk.Button(card, text="📂 เปิด", command=lambda p=path: subprocess.Popen(["explorer", "/select,", p])).pack(side="right", padx=4, pady=4)
-        card.pack(fill="x", pady=2)
+        ref_gallery_cards.insert(0 if prepend else len(ref_gallery_cards), card)
+        _relayout_ref_gallery()
     g["_ref_gallery_add"] = _ref_gallery_add
     
     def _clean_character_ref_context(line):
@@ -772,7 +1184,6 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     def _character_outfit_instruction(entity, film):
         """Return one story-derived wardrobe lock; no user wardrobe input required."""
         return wardrobe_prompt_text(entity if isinstance(entity, dict) else {}, film if isinstance(film, dict) else {})
-
     def _outfit_name_hint(name, kind):
         if str(kind or "").lower() == "location":
             return name
@@ -785,6 +1196,134 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         else:
             suffix = mode
         return f"{name}__{suffix}"
+
+    ghost_bible_path = BASE / "ghost_visual_bible.json"
+    GHOST_DESIGN_VERSION = 3
+
+    def _is_ghost_character(name, entity):
+        """Only explicit supernatural characters enter ghost research."""
+        return is_explicit_ghost_character(name, entity)
+
+    def _load_ghost_bible():
+        try:
+            data = json.loads(ghost_bible_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("ghosts"), dict):
+                return data
+        except Exception:
+            pass
+        return {"version": 1, "ghosts": {}}
+
+    def _save_ghost_bible(data):
+        temp = ghost_bible_path.with_suffix(".tmp")
+        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(str(temp), str(ghost_bible_path))
+
+    def _analyze_ghost_character(name, entity, film):
+        """Research one named ghost before image generation; cache by context."""
+        import hashlib
+        context = {
+            "name": str(name or "").strip(),
+            "character": entity if isinstance(entity, dict) else {},
+            "story": film if isinstance(film, dict) else {},
+        }
+        context_hash = hashlib.sha256(
+            json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:20]
+        bible = _load_ghost_bible()
+        cache_key = str(name or "").strip().casefold()
+        cached = bible.get("ghosts", {}).get(cache_key)
+        if (isinstance(cached, dict)
+                and cached.get("context_hash") == context_hash
+                and cached.get("design_version") == GHOST_DESIGN_VERSION):
+            return cached, True
+
+        system_prompt = (
+            "คุณเป็นนักค้นคว้าคติผีไทยและ character concept artist. "
+            "วิเคราะห์ชนิดผีจากชื่อและข้อมูลเรื่องก่อนออกแบบภาพ ไม่สร้างรูป และตอบ JSON object เท่านั้น. "
+            "แยกข้อเท็จจริงในคติที่รู้จักทั่วไปออกจากรายละเอียดที่เรื่องแต่งเพิ่ม. "
+            "หากชื่อเป็นชนิดเฉพาะ เช่น ผีโพง กระสือ กระหัง ปอบ เปรต นางตานี หรือแม่นาก "
+            "ต้องอธิบายเครื่องหมายจำเพาะของชนิดนั้น ห้ามเปลี่ยนเป็นผีผู้หญิงชุดขาวทั่วไป. "
+            "ถ้าคติแตกต่างตามท้องถิ่น ให้เลือกภาพจำที่พบกว้างและระบุ uncertainty สั้นๆ. "
+            "ออกแบบ HORROR SELLING POINTS ที่เห็นแล้วจำได้ทันที 2-3 ข้อ และต้องมองเห็นได้จริงใน reference sheet พื้นขาวทุกมุม. "
+            "จุดขายต้องมาจากกายภาพของผี เช่น โครงหน้า ดวงตา ปาก ผิว เส้นเลือด สัดส่วน ท่าทาง หรือเครื่องหมายตามคติ ไม่ใช่พึ่งฉากมืด หมอก เลือด หรือไฟเรืองอย่างเดียว. "
+            "ต้องมี silhouette และ facial read แบบตัวร้ายหนังผีไทยระดับภาพยนตร์ เห็นภาพแล้วรู้ว่าเป็นสิ่งเหนือธรรมชาติ ไม่ใช่นักแสดงแต่งหน้าแก่หรือเปื้อนดิน. "
+            "ออกแบบผิวแบบศพซอมบี้สมจริงโดยไม่เปลี่ยนชนิดผี: ผิวซีดเทาอมเขียวแบบไร้เลือด ด่างเป็นหย่อม "
+            "แห้งกร้านคล้ายหนัง เส้นเลือดคล้ำเห็นใต้ผิว รอยแตกลายละเอียด เนื้อรอบตาและแก้มยุบ และสีผิวตายไม่สม่ำเสมอ. "
+            "ห้ามทำเป็นเพียงริ้วรอยคนแก่ และห้ามแผลเปิด เนื้อฉีก หรือ gore. "
+            "ออกแบบความน่ากลัวแบบ non-graphic supernatural horror: ใช้รูปร่าง ผิว ดวงตา ท่าทาง "
+            "เสื้อผ้า แสง และสิ่งเรือง/ควันตามคติ; ห้ามเลือดสาด แผลเปิด อวัยวะขาด เนื้อฉีก gore "
+            "หรือความรุนแรงต่อเด็ก. ต้องรักษาอายุ เพศ ใบหน้า ยุค และข้อเท็จจริงจากเรื่อง. "
+            "อนุญาตการแต่งหน้าเอฟเฟกต์ภาพยนตร์ เช่น ผิวแตกร้าวเหนือธรรมชาติ ผิวชำรุด รอยช้ำคล้ำ "
+            "คราบสีแดงเข้มแห้ง เงาดำใต้ผิว และท่าทางผิดธรรมชาติ เมื่อเข้ากับชนิดผี. "
+            "schema: {\"ghost_type\":\"\",\"folklore_identity\":\"\",\"horror_selling_points\":[\"\"],"
+            "\"signature_traits\":[\"\"],\"face_and_skin\":\"\",\"eyes\":\"\","
+            "\"hair\":\"\",\"body_and_pose\":\"\",\"wardrobe\":\"\","
+            "\"supernatural_effects\":[\"\"],\"must_include\":[\"\"],"
+            "\"must_not_include\":[\"\"],\"uncertainty\":\"\"}"
+        )
+        user_prompt = (
+            "วิเคราะห์ตัวละครผีนี้ให้เป็นแบบภาพอ้างอิงที่จำเพาะและสมจริง:\n" +
+            json.dumps(context, ensure_ascii=False, indent=2)[:12000]
+        )
+        payload = {
+            "model": "gpt-4o-mini",
+            "chatgpt_image_intercept": False,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+        }
+        payload_path = Path(BASE) / "snapgen_data" / "temp" / "ghost_ref_analysis.json"
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            data = _run_json([
+                "curl", "--max-time", "240", "-s", _chatgpt_api_base() + "/chat/completions",
+                "-H", "Authorization: Bearer local-dev-key",
+                "-H", "Content-Type: application/json",
+                "--data-binary", "@" + str(payload_path),
+            ], timeout=250)
+            if data.get("error"):
+                raise RuntimeError(json.dumps(data["error"], ensure_ascii=False))
+            output = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+            output = output.replace("```json", "").replace("```", "").strip()
+            start, end = output.find("{"), output.rfind("}")
+            if start < 0 or end <= start:
+                raise RuntimeError("GPT ไม่ได้ส่งผลวิเคราะห์ผีเป็น JSON")
+            design = json.loads(output[start:end + 1])
+            if not isinstance(design, dict) or not design.get("ghost_type"):
+                raise RuntimeError("GPT ยังไม่ได้ระบุชนิดผี")
+            design["context_hash"] = context_hash
+            design["design_version"] = GHOST_DESIGN_VERSION
+            design["name"] = str(name or "").strip()
+            bible.setdefault("ghosts", {})[cache_key] = design
+            _save_ghost_bible(bible)
+            return design, False
+        finally:
+            try:
+                payload_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _ghost_design_prompt_text(design):
+        if not isinstance(design, dict):
+            return ""
+        rows = []
+        for key, label in (
+            ("ghost_type", "ชนิดผี"), ("folklore_identity", "คติและภาพจำ"),
+            ("horror_selling_points", "จุดขายหนังผี"),
+            ("signature_traits", "เครื่องหมายจำเพาะ"), ("face_and_skin", "ใบหน้าและผิว"),
+            ("eyes", "ดวงตา"), ("hair", "ผม"), ("body_and_pose", "รูปร่างและท่า"),
+            ("wardrobe", "เสื้อผ้า"), ("supernatural_effects", "ลักษณะเหนือธรรมชาติ"),
+            ("must_include", "ต้องมี"), ("must_not_include", "ห้ามมี"),
+        ):
+            value = design.get(key)
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value if str(item).strip())
+            if str(value or "").strip():
+                rows.append(f"{label}: {value}")
+        return "; ".join(rows)
 
     location_bible_path = BASE / "location_visual_bible.json"
 
@@ -1059,7 +1598,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             except Exception:
                 pass
 
-    def _build_ref_prompt(name, entity_kind="", location_design=None, use_context_override=None):
+    def _build_ref_prompt(name, entity_kind="", location_design=None, use_context_override=None, ghost_design=None):
         selected_ctx = str(g.get("_ref_selected_context", "") or "").strip()
         selected_name = str(g.get("_ref_selected_name", "") or "").strip()
         selected_kind = str(g.get("_ref_selected_kind", "") or "").strip().lower()
@@ -1073,18 +1612,42 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         else:
             kind, entity, film = "manual", {}, {}
 
+        if isinstance(ghost_design, dict):
+            # Keep room for the non-negotiable reference-sheet layout and
+            # lighting rules below. Long folklore analysis used to push the
+            # white-background lock past the 1,200-character clip boundary.
+            ghost_source = _clip_ref_prompt(_ghost_design_prompt_text(ghost_design), 260)
+            identity = _clip_ref_prompt(_useful_context_fields(entity, (
+                ("visual_identity", "ตัวตนเดิม"), ("อายุ", "วัย"), ("เพศ", "เพศ"),
+                ("รูปร่าง", "รูปร่าง"), ("ทรงผม", "ผม"), ("ใบหน้า", "ใบหน้า"),
+                ("ลักษณะเด่น", "จุดจำ"),
+            )), 150) or "ยึดชื่อและชนิดผีที่ผู้ใช้ระบุ"
+            return _clip_ref_prompt(
+                f"สร้าง THAI GHOST CHARACTER REFERENCE SHEET ของ '{name}' ผีชนิดเฉพาะเพียงตัวเดียว. "
+                "REFERENCE SHEET LOCK: พื้นหลังขาวล้วนทุกช่อง ใช้ bright high-key studio แสงขาวนุ่มสม่ำเสมอ เห็นผม ใบหน้า เสื้อผ้า และรูปร่างครบชัดเจน. ห้ามพื้นดำ โทนมืด ฉากกลางคืน หมอก ควัน วิวสถานที่ และ dramatic low-key lighting. "
+                "HORROR CREATURE LOCK: ทำเป็นตัวร้ายหนังผีไทยที่มีจุดขายทางกายภาพ 2-3 จุดเด่น เห็นชัดและจำได้ทันทีทุกมุม แม้อยู่บนพื้นขาว. จุดขายต้องอยู่ที่ใบหน้า ดวงตา ปาก ผิว สัดส่วน ท่าทาง หรือเครื่องหมายเฉพาะชนิดผี ไม่ใช่แค่คนแก่สกปรกและไม่ใช่แค่แสงเรืองที่จมูก. "
+                "ZOMBIE-SKIN LOCK: ใช้เฉพาะลักษณะผิวศพซอมบี้ที่สมจริงกับผีตัวเดิม—ผิวซีดเทาอมเขียวไร้เลือด ด่างเป็นหย่อม แห้งกร้านคล้ายหนัง เส้นเลือดคล้ำใต้ผิว รอยแตกลายละเอียด เบ้าตาและแก้มยุบ สีผิวตายไม่สม่ำเสมอ. ต้องเห็นลักษณะนี้ชัดทั้งใบหน้า คอ แขน และขา. ห้ามให้เป็นเพียงริ้วรอยคนแก่ ห้ามแผลเปิด เนื้อฉีก และ gore. "
+                "MANDATORY COMPOSITION: สร้าง Ref แนวนอน 16:9 แบบ EXACTLY 3 visible depictions เรียงซ้ายไปขวาในแถวเดียว: (1) FRONT FACE head-and-shoulders portrait หน้าตรงมองกล้อง, (2) THREE-QUARTER VIEW head-and-shoulders portrait หันประมาณ 45 องศา เห็นใบหน้าชัด, (3) FULL-BODY FRONT VIEW ยืนตรง เห็นศีรษะถึงเท้าครบ. รูปเต็มตัวต้องอยู่ขวาสุดและมองเห็นครบชัดเจน. "
+                "ทั้ง 3 ต้องเป็นตัวเดียวกัน หน้าเดียวกัน ทรงผมเดียวกัน ชุดเดียวกัน และลักษณะเหนือธรรมชาติเดียวกัน. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ, ห้ามหัวเรื่อง กล่องข้อมูล AGE HEIGHT ROLE PERSONALITY NOTE label color swatch หรือข้อความใดๆ เพราะโปรแกรมเติมชื่อเอง. "
+                f"ล็อกตัวตนจากเรื่อง: {identity}. งานวิเคราะห์คติและรูปลักษณ์ก่อนสร้าง: {ghost_source}. "
+                "ห้ามทำเป็นผีชุดขาวทั่วไป ห้ามเปลี่ยนชนิดผี และต้องเห็นเครื่องหมายจำเพาะชัดทุกมุม. ผลลัพธ์ต้องดูเป็นผีอย่างชัดเจนแม้อยู่บนพื้นขาว ห้ามออกมาเป็นเพียงมนุษย์แก่หรือมนุษย์สกปรก. "
+                "ห้ามสร้างหัวเรื่อง NOTE คำอธิบาย หรือตัวอักษรยาวภายในภาพ เพราะโปรแกรมจะเติมป้ายชื่อมุมล่างภายหลัง. "
+                "ทุกช่องเป็นคนเดียวกัน ใบหน้า อายุ เสื้อผ้า รูปร่าง และลักษณะเหนือธรรมชาติตรงกัน. "
+                f"{GHOST_CINEMATIC_HORROR_EFFECTS}. "
+                "photorealistic Thai supernatural character reference, pure white background, no text, no watermark.",
+                1600,
+            )
+
         if kind == "manual":
             outfit_mode = str(ref_outfit_var.get() or "อัตโนมัติตามเนื้อเรื่อง").strip()
             outfit_text = ""
             if outfit_mode != "อัตโนมัติตามเนื้อเรื่อง":
                 outfit_text = f" เปลี่ยนเฉพาะเสื้อผ้าตามคำสั่งนี้: {_character_outfit_instruction({}, {})}."
             return _clip_ref_prompt(
-                f"สร้าง SUBJECT REFERENCE SHEET ของ '{name}' จากชื่อที่ผู้ใช้พิมพ์เท่านั้น ห้ามใช้ข้อมูลจาก Prompt Context หรือเนื้อเรื่อง. "
-                "ต้องเป็นสิ่งเดียวกันทุกช่องและรักษาชนิด รูปร่าง สี ลวดลาย และจุดจำให้ตรงกัน. "
-                "ด้านบน 4 ช่องเป็นมุมใกล้: หน้าตรง, ซ้าย, ขวา, สามส่วน. ด้านล่าง 2 ช่องเป็นภาพเต็มตัวหรือเต็มรูปทรงด้านหน้าและด้านหลัง. "
-                "ถ้าเป็นสัตว์หรือสิ่งที่ปกติไม่สวมเสื้อผ้า ห้ามเพิ่มเสื้อผ้าเอง. "
-                f"แถบล่างใส่ชื่อไทย '{name}' ครั้งเดียว.{outfit_text} "
-                "พื้นขาว แสง high-key 5600K สว่างสม่ำเสมอ รายละเอียดคมชัด ห้ามฉาก คนอื่น ข้อความอื่น และ watermark. photorealistic."
+                f"สร้าง SUBJECT REFERENCE IMAGE แนวนอน 16:9 ของ '{name}' จากชื่อที่ผู้ใช้พิมพ์เท่านั้น. "
+                "MANDATORY COMPOSITION: ต้องมี EXACTLY 3 visible depictions เท่านั้น เรียงซ้ายไปขวาแถวเดียว: (1) FRONT FACE head-and-shoulders portrait หน้าตรง, (2) THREE-QUARTER VIEW head-and-shoulders portrait หันประมาณ 45 องศา, (3) FULL-BODY FRONT VIEW ยืนตรง เห็นศีรษะถึงเท้าครบ. รูปเต็มตัวต้องอยู่ขวาสุดและห้ามหายหรือถูกตัดเท้า. "
+                "ทั้ง 3 ต้องเป็นตัวเดียวกัน รูปลักษณ์เดียวกันและชุดเดียวกัน. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ, ห้ามหัวเรื่อง AGE HEIGHT ROLE PERSONALITY NOTE label color swatch info box หรือข้อความใดๆ เพราะโปรแกรมเติมชื่อเอง. "
+                f"{outfit_text} พื้นหลังขาวหรือเทาอ่อนเรียบ แสง ID-photo สม่ำเสมอ photorealistic, sharp, no watermark."
             )
 
         if kind == "location":
@@ -1116,8 +1679,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             )
 
         # Character Ref is a pure serialization of one canonical Character Visual Bible object.
-        # No wardrobe inference or cross-character lookup is allowed here.
+        # No wardrobe inference, ghost reinterpretation, or cross-character lookup is allowed here.
         return _clip_ref_prompt(character_prompt_text(entity), 4200)
+        
     g["_clean_character_ref_context"] = _clean_character_ref_context
     g["_extract_character_appearance"] = _extract_character_appearance
     g["_context_entity_for_ref"] = _context_entity
@@ -1237,6 +1801,15 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         if not names:
             _ref_log("ไม่มีชื่อสำหรับสร้าง Ref")
             return
+        has_ref_story = g.get("has_ref_story_history")
+        current_ref_title = g.get("get_ref_story_title")
+        valid_ref_story = bool(has_ref_story()) if callable(has_ref_story) else False
+        title = current_ref_title() if callable(current_ref_title) else ""
+        if not valid_ref_story or not title:
+            ref_story_title_var.set("")
+            _ref_log("[บทเรื่อง] ยังไม่ได้ส่งบทปัจจุบันเข้า GPT ของหน้า Ref — กด เริ่มประวัติใหม่ ก่อน")
+            return
+        ref_story_title_var.set(title)
         ok_bridge, bridge_msg = _ref_bridge_ready()
         _ref_log(bridge_msg)
         if not ok_bridge:
@@ -1270,6 +1843,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     else:
                         context_kind, context_entity, _film = "manual", {}, {}
                     location_design = None
+                    ghost_design = None
                     if context_kind == "location" or entity_kind == "location":
                         _ref_log(f"[location-lock] กำลังอ่าน Context และออกแบบ: {name}")
                         location_design, reused = _design_location_via_context(name)
@@ -1281,6 +1855,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         entity_kind=entity_kind or context_kind,
                         location_design=location_design,
                         use_context_override=context_enabled,
+                        ghost_design=ghost_design,
                     )
                     if context_kind == "manual":
                         _ref_log(f"[manual] ใช้เฉพาะชื่อที่พิมพ์: {name} — ไม่ดึง Prompt Context")
@@ -1296,14 +1871,18 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         if refined_prompt and refined_prompt != prompt:
                             _ref_log(f"[refine] ได้ prompt ใหม่ ({len(refined_prompt)} chars)")
                             prompt = refined_prompt
-                    elif context_kind == "character":
-                        _ref_log("[refine] ข้าม Character Ref — ใช้ canonical Visual Bible prompt โดยตรง")
+                    else:
+                        _ref_log("[refine] ข้าม Character Ref เพื่อรักษา layout หน้าตรง + 3/4 view + เต็มตัว ตาม prompt โดยตรง")
                     if auto and auto_ref_stop[0]:
                         _ref_log(f"[auto-ref] หยุดแล้ว — ข้าม {name}")
                         return
                     _ref_log(f"[auto-ref] รูปที่ {idx}/{len(names)} — เริ่มสร้าง: {name}")
-                    ref_aspect_ratio = "1:1" if is_location_ref else "16:9"
-                    payload = {"model":"gpt-5-5", "prompt":prompt, "n":1, "aspect_ratio":ref_aspect_ratio, "history_and_training_disabled":False}
+                    ref_aspect_ratio = "1:1" if (context_kind == "location" or entity_kind == "location") else "16:9"
+                    payload = {
+                        "model":"gpt-5-5", "prompt":prompt, "n":1,
+                        "aspect_ratio":ref_aspect_ratio, "history_and_training_disabled":False,
+                        "_use_ref_story_history": bool(is_location_ref),
+                    }
                     if ref_image and os.path.exists(ref_image):
                         with open(ref_image, "rb") as _f:
                             import base64 as _b64
@@ -1314,7 +1893,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         _ref_log(f"[debug] Character Ref snapshot: {debug_path}")
                     file_hint = _outfit_name_hint(name, entity_kind or context_kind)
                     out = g["_do_image_request"](payload, is_edit=bool(ref_image and os.path.exists(ref_image)), prompt=prompt, name_hint=file_hint, raw_prompt=prompt, output_dir=str(export_ref_dir))
-                    root.after(0, lambda out=out: (_ref_log(f"✓ {out}"), _ref_gallery_add(out, True), _notify_done()))
+                    out = _normalize_ref_output(out, name)
+                    root.after(0, lambda out=out, ghost=bool(ghost_design): (
+                        _ref_log(f"✓ {out}"), _ref_gallery_add(out, True, is_ghost=ghost), _notify_done()
+                    ))
                 def run_all():
                     for idx, name in enumerate(names, 1):
                         if auto and auto_ref_stop[0]:
@@ -1378,17 +1960,42 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         for child in gallery_inner.winfo_children():
             child.destroy()
         ref_gallery_images.clear()
+        ref_gallery_cards.clear()
+        ref_gallery_paths.clear()
+        _save_ref_gallery()
         _ref_log("ล้างรูป Ref gallery แล้ว")
     g["clear_ref_gallery"] = clear_ref_gallery
+
+    def _restore_ref_gallery():
+        try:
+            payload = json.loads(ref_gallery_state_path.read_text(encoding="utf-8"))
+            saved = payload.get("paths") if isinstance(payload, dict) else []
+        except FileNotFoundError:
+            saved = [
+                str(path) for path in sorted(
+                    Path(export_ref_dir).glob("*"),
+                    key=lambda item: item.stat().st_mtime,
+                    reverse=True,
+                )
+                if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+            ]
+        except (json.JSONDecodeError, OSError):
+            saved = []
+        ref_gallery_paths[:] = [str(Path(path)) for path in saved if Path(path).is_file()]
+        _save_ref_gallery()
+        for path in reversed(ref_gallery_paths):
+            _ref_gallery_add(path, prepend=True, persist=False)
+
+    root.after(50, _restore_ref_gallery)
     
-    make_ref_btn = tk.Button(row, text="🎭 สร้าง Ref", command=generate_ref, bg="#6D28D9", fg="white", activebackground="#7C3AED", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=("Leelawadee UI", 9, "bold"))
+    make_ref_btn = tk.Button(row, text="🎭 สร้าง Ref", command=generate_ref, bg="#059669", fg="white", activebackground="#10B981", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold"))
     make_ref_btn.pack(side="left", padx=4)
     ref_make_btn[0] = make_ref_btn
     g["ref_make_btn"] = make_ref_btn
     
     # Pack Select AFTER สร้าง Ref (so สร้าง Ref appears first on the left)
     ref_select_btn.pack(side="left", padx=(0, 4))
-    auto_btn = tk.Button(row, text="⚡ Auto ตัวละคร", command=generate_auto_ref, bg="#0EA5E9", fg="white", activebackground="#0284C7", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=("Leelawadee UI", 9, "bold"))
+    auto_btn = tk.Button(row, text="⚡ Auto ตัวละคร", command=generate_auto_ref, bg="#0EA5E9", fg="white", activebackground="#0284C7", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold"))
     auto_btn.pack(side="left", padx=4)
     auto_ref_btn[0] = auto_btn
     g["auto_ref_btn"] = auto_btn
@@ -1460,9 +2067,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 root.after(0, fail)
         threading.Thread(target=discover_worker, daemon=True).start()
     g["generate_auto_ref_location"] = generate_auto_ref_location
-    auto_loc_btn = tk.Button(row, text="🏠 Auto สถานที่", command=generate_auto_ref_location, bg="#0288D1", fg="white", activebackground="#0277BD", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=16, height=1, font=("Leelawadee UI", 9, "bold"))
+    auto_loc_btn = tk.Button(row, text="🏠 Auto สถานที่", command=generate_auto_ref_location, bg="#0288D1", fg="white", activebackground="#0277BD", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold"))
     auto_loc_btn.pack(side="left", padx=4)
-    tk.Button(row, text="Clear", command=lambda: (ref_name_var.set(""), log.delete("1.0", tk.END)), bg="#DC2626", fg="white", activebackground="#B91C1C", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=("Leelawadee UI", 9, "bold")).pack(side="left", padx=4)
-    tk.Button(row, text="🧹 ล้างรูป", command=clear_ref_gallery, bg="#DC2626", fg="white", activebackground="#B91C1C", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=("Leelawadee UI", 9, "bold")).pack(side="left", padx=4)
+    tk.Button(row, text="Clear", command=lambda: (ref_name_var.set(""), log.delete("1.0", tk.END)), bg="#DC2626", fg="white", activebackground="#B91C1C", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
+    tk.Button(row, text="🧹 ล้างรูป", command=clear_ref_gallery, bg="#DC2626", fg="white", activebackground="#B91C1C", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
     g["ref_page"] = ref_page
     return ref_page
+
