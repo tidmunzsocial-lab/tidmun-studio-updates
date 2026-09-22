@@ -13056,7 +13056,7 @@ def _restore_image_mode_latest():
         payload_file = os.path.join(tempfile.gettempdir(), "snapgen_refine_image_prompt.json")
         try:
             with open(payload_file, "w", encoding="utf-8") as f:
-                json.dump({
+                payload = {
                     "model": "auto",
                     "chatgpt_image_intercept": False,
                     "messages": [
@@ -13064,7 +13064,12 @@ def _restore_image_mode_latest():
                         {"role": "user", "content": user_msg},
                     ],
                     "temperature": 0.2,
-                }, f, ensure_ascii=False)
+                }
+                if page_type == "ref":
+                    ref_context_fn = getattr(_imgmod, "get_ref_story_request_context", None)
+                    if callable(ref_context_fn):
+                        payload.update(ref_context_fn())
+                json.dump(payload, f, ensure_ascii=False)
             data = _run_json([
                 "curl", "--max-time", "180", "-s", _chatgpt_api_base() + "/chat/completions",
                 "-H", "Authorization: Bearer local-dev-key",
@@ -13073,6 +13078,10 @@ def _restore_image_mode_latest():
             ], timeout=190)
             if data.get("error"):
                 raise RuntimeError(json.dumps(data["error"], ensure_ascii=False))
+            if page_type == "ref":
+                ref_update_fn = getattr(_imgmod, "update_ref_story_conversation", None)
+                if callable(ref_update_fn):
+                    ref_update_fn(data)
             out = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
             out = re.sub(r"^```(?:json|text)?\s*", "", out).replace("```", "").strip()
             try:

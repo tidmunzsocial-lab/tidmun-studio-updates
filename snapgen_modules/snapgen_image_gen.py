@@ -165,6 +165,39 @@ def has_ref_story_conversation():
 def get_ref_story_title():
     return _valid_story_title(_ref_story_conversation)
 
+def get_ref_story_request_context():
+    """Return the current Ref cursor for text or image Bridge requests."""
+    conversation_id = str(_ref_story_conversation.get("conversation_id") or "").strip()
+    parent_message_id = str(_ref_story_conversation.get("parent_message_id") or "").strip()
+    if not conversation_id or not parent_message_id:
+        return {}
+    context = {
+        "metadata": {
+            "conversation_id": conversation_id,
+            "parent_message_id": parent_message_id,
+        }
+    }
+    account_alias = str(_ref_story_conversation.get("account_alias") or "").strip()
+    if account_alias:
+        context["chatgpt_account"] = account_alias
+    return context
+
+def update_ref_story_conversation(result):
+    """Advance Ref's persisted cursor from any successful Bridge response."""
+    if not isinstance(result, dict):
+        return
+    if result.get("conversation_id"):
+        _ref_story_conversation["conversation_id"] = str(result["conversation_id"])
+    if result.get("parent_message_id"):
+        _ref_story_conversation["parent_message_id"] = str(result["parent_message_id"])
+    if result.get("chatgpt_account"):
+        _ref_story_conversation["account_alias"] = str(result["chatgpt_account"])
+    if (
+        _ref_story_conversation.get("conversation_id")
+        and _ref_story_conversation.get("parent_message_id")
+    ):
+        _save_ref_story_conversation()
+
 def _load_story_face_conversation():
     _load_conversation(_STORY_FACE_STATE_PATH, _story_face_conversation)
 
@@ -1023,12 +1056,8 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
             "parent_message_id": _story_conversation["parent_message_id"],
         }
         payload["chatgpt_account"] = _story_conversation["account_alias"]
-    elif use_ref_story_history and _ref_story_conversation["conversation_id"] and _ref_story_conversation.get("account_alias"):
-        payload["metadata"] = {
-            "conversation_id": _ref_story_conversation["conversation_id"],
-            "parent_message_id": _ref_story_conversation["parent_message_id"],
-        }
-        payload["chatgpt_account"] = _ref_story_conversation["account_alias"]
+    elif use_ref_story_history:
+        payload.update(get_ref_story_request_context())
     elif use_story_face_history and _story_face_conversation["conversation_id"] and _story_face_conversation.get("account_alias"):
         payload["metadata"] = {
             "conversation_id": _story_face_conversation["conversation_id"],
@@ -1088,12 +1117,15 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                     current_history = _prop_conversation
                 elif isinstance(conversation_state, dict):
                     current_history = conversation_state
-                if current_history and current_history.get("conversation_id") and current_history.get("account_alias"):
+                if current_history and current_history.get("conversation_id") and current_history.get("parent_message_id"):
                     payload["metadata"] = {
                         "conversation_id": current_history["conversation_id"],
                         "parent_message_id": current_history["parent_message_id"],
                     }
-                    payload["chatgpt_account"] = current_history["account_alias"]
+                    if current_history.get("account_alias"):
+                        payload["chatgpt_account"] = current_history["account_alias"]
+                    else:
+                        payload.pop("chatgpt_account", None)
                 elif current_history is not None:
                     payload.pop("metadata", None)
                     payload.pop("chatgpt_account", None)

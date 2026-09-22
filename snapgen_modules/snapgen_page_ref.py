@@ -79,6 +79,21 @@ def build_ref_edit_prompt(comment, ghost=True):
 def install(g: dict, root: tk.Misc) -> tk.Misc:
     """Build this page and return its root frame."""
     globals().update(g)
+
+    def _bind_ref_story_payload(payload):
+        """Keep every Ref-side GPT request on the same persisted history."""
+        module = globals().get("_imgmod")
+        context_fn = getattr(module, "get_ref_story_request_context", None)
+        if callable(context_fn):
+            payload.update(context_fn())
+        return payload
+
+    def _advance_ref_story_history(result):
+        module = globals().get("_imgmod")
+        update_fn = getattr(module, "update_ref_story_conversation", None)
+        if callable(update_fn):
+            update_fn(result)
+
     lock_g = {"_selection_locks": {}, "_selection_lock_vars": []}
     export_ref_dir = g.get("EXPORT_REF", BASE / "ref")
     ref_page = tk.Frame(root, bg="#FAFAF7")
@@ -1260,6 +1275,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             ],
             "temperature": 0.1,
         }
+        _bind_ref_story_payload(payload)
         payload_path = Path(BASE) / "snapgen_data" / "temp" / "ghost_ref_analysis.json"
         payload_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -1272,6 +1288,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             ], timeout=250)
             if data.get("error"):
                 raise RuntimeError(json.dumps(data["error"], ensure_ascii=False))
+            _advance_ref_story_history(data)
             output = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
             output = output.replace("```json", "").replace("```", "").strip()
             start, end = output.find("{"), output.rfind("}")
@@ -1435,7 +1452,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         payload_file = os.path.join(_tempfile.gettempdir(), "snapgen_location_design.json")
         try:
             with open(payload_file, "w", encoding="utf-8") as f:
-                _json.dump({
+                _json.dump(_bind_ref_story_payload({
                     "model": "auto",
                     "chatgpt_image_intercept": False,
                     "messages": [
@@ -1443,7 +1460,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         {"role": "user", "content": user_prompt},
                     ],
                     "temperature": 0.15,
-                }, f, ensure_ascii=False)
+                }), f, ensure_ascii=False)
             data = _run_json([
                 "curl", "--max-time", "240", "-s", _chatgpt_api_base() + "/chat/completions",
                 "-H", "Authorization: Bearer local-dev-key",
@@ -1452,6 +1469,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             ], timeout=250)
             if data.get("error"):
                 raise RuntimeError(_json.dumps(data["error"], ensure_ascii=False))
+            _advance_ref_story_history(data)
             out = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
             out = out.replace("```json", "").replace("```", "").strip()
             start, end = out.find("{"), out.rfind("}")
@@ -1526,11 +1544,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         payload_file = os.path.join(_tempfile.gettempdir(), "snapgen_location_targets.json")
         try:
             with open(payload_file, "w", encoding="utf-8") as f:
-                _json.dump({
+                _json.dump(_bind_ref_story_payload({
                     "model": "auto", "chatgpt_image_intercept": False,
                     "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
                     "temperature": 0.1,
-                }, f, ensure_ascii=False)
+                }), f, ensure_ascii=False)
             data = _run_json([
                 "curl", "--max-time", "240", "-s", _chatgpt_api_base() + "/chat/completions",
                 "-H", "Authorization: Bearer local-dev-key", "-H", "Content-Type: application/json",
@@ -1538,6 +1556,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             ], timeout=250)
             if data.get("error"):
                 raise RuntimeError(_json.dumps(data["error"], ensure_ascii=False))
+            _advance_ref_story_history(data)
             out = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
             out = out.replace("```json", "").replace("```", "").strip()
             start, end = out.find("{"), out.rfind("}")
