@@ -35,6 +35,7 @@ snapgen_vast_ed25519.pub
 .claude/
 .codex/
 STATE.md
+/docs/MINIMAX_H3_LINK_NOTES.md
 
 # Shortcuts and OS files
 *.lnk
