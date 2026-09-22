@@ -636,6 +636,7 @@ def _ingest_story_file_into(
         "อ่านให้ครบและจำตัวละคร บทบาท ความสัมพันธ์ ยุค ฐานะ รูปลักษณ์ เสื้อผ้าที่เหมาะกับเหตุการณ์ "
         "สถานที่ และข้อเท็จจริงของเรื่องไว้ในประวัตินี้ ยังไม่ต้องสร้างภาพ ตอบ STORY_READY พร้อมสรุปหนึ่งประโยค"
     )
+    story_text = content.decode("utf-8", errors="replace")
     if attach_file:
         message_content = [
             {"type": "input_file", "filename": name, "mime_type": "text/plain; charset=utf-8",
@@ -643,28 +644,51 @@ def _ingest_story_file_into(
             {"type": "input_text", "text": instruction},
         ]
     else:
-        story_text = content.decode("utf-8", errors="replace")
         message_content = instruction + "\n\n--- บทเต็ม ---\n" + story_text
-    payload = {
-        "model": "chatgpt-web/auto",
-        "messages": [{"role": "user", "content": message_content}],
-        "history_and_training_disabled": False,
-        "metadata": {"chatgpt_image_intercept": False},
-    }
-    req = urllib.request.Request(
-        f"{BRIDGE_URL}/v1/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Authorization": f"Bearer {BRIDGE_KEY}", "Content-Type": "application/json"},
-        method="POST",
-    )
+
+    def post_story(content_value, model_value):
+        payload = {
+            # The Bridge's account-aware alias is `auto`; keep story ingestion
+            # on the same route as the rest of Image AI instead of forcing the
+            # ChatGPT Web model namespace.
+            "model": str(model_value or "auto"),
+            "messages": [{"role": "user", "content": content_value}],
+            "history_and_training_disabled": False,
+            "metadata": {"chatgpt_image_intercept": False},
+        }
+        req = urllib.request.Request(
+            f"{BRIDGE_URL}/v1/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Authorization": f"Bearer {BRIDGE_KEY}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace"))
+
     log(f"[บทเรื่อง] กำลังส่งบท {name} เข้า GPT...")
     try:
         with _queue_lock:
-            with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                result = json.loads(response.read().decode("utf-8", errors="replace"))
+            result = post_story(message_content, MODEL)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"ส่งบทไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+        body = exc.read().decode("utf-8", errors="replace")[:900]
+        pointer_error = "midi_asset_pointer" in body.casefold() or "provider_status=422" in body.casefold()
+        if not pointer_error:
+            raise RuntimeError(f"ส่งบทไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+        # Some ChatGPT Web captures reject any file/pointer-shaped content in
+        # conversation requests. Retry as one plain text message so story
+        # ingestion remains usable on those captures, including Ref uploads.
+        log("[บทเรื่อง] Bridge ไม่รับ pointer — ลองส่งบทเป็นข้อความล้วนแทน...")
+        try:
+            with _queue_lock:
+                result = post_story(
+                    instruction + "\n\n--- บทเต็ม ---\n" + story_text,
+                    "auto",
+                )
+        except urllib.error.HTTPError as retry_exc:
+            retry_body = retry_exc.read().decode("utf-8", errors="replace")[:900]
+            raise RuntimeError(f"ส่งบทไม่สำเร็จ HTTP {retry_exc.code}: {retry_body}") from retry_exc
+        except Exception as retry_exc:
+            raise RuntimeError(f"ส่งบทไม่สำเร็จ: {retry_exc}") from retry_exc
     except Exception as exc:
         raise RuntimeError(f"ส่งบทไม่สำเร็จ: {exc}") from exc
     if isinstance(result.get("error"), dict):
