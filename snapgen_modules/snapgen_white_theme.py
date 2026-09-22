@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
+from snapgen_fonts import font_family as _snapgen_font_family
+
+SNAPGEN_UI_FONT = _snapgen_font_family()
 
 
 WHITE = "#FFFFFF"
@@ -95,13 +98,13 @@ def apply_settings_dialog(window: tk.Toplevel) -> None:
                 # Geometry only. Deliberately do not pass bg/fg/active colors.
                 widget.configure(relief="flat", bd=0, borderwidth=0,
                                  highlightthickness=0, padx=12, pady=6,
-                                 font=("Leelawadee UI", 9, "bold"), cursor="hand2")
+                                 font=(SNAPGEN_UI_FONT, 9, "bold"), cursor="hand2")
             elif cls == "Labelframe":
                 widget.configure(padx=12, pady=10)
             elif cls == "Label":
-                widget.configure(font=("Leelawadee UI", 10))
+                widget.configure(font=(SNAPGEN_UI_FONT, 10))
             elif cls == "Entry":
-                widget.configure(font=("Leelawadee UI", 10), padx=8, pady=6)
+                widget.configure(font=(SNAPGEN_UI_FONT, 10), padx=8, pady=6)
         except Exception:
             pass
         try:

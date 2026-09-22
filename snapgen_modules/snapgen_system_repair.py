@@ -8,6 +8,7 @@ application and the current Windows user profile.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,7 +25,10 @@ import venv
 import zipfile
 
 
-BRIDGE_ZIP_URL = "https://github.com/suphotP/chatgpt-api/archive/refs/heads/main.zip"
+BRIDGE_RELEASE_VERSION = "1.0.1"
+BRIDGE_ZIP_URL = "https://github.com/tidmunzsocial-lab/snapgen-chatgpt-bridge/releases/download/v1.0.1/snapgen-bridge-v1.0.1.zip"
+BRIDGE_ZIP_SHA256 = "ad0d1df5295a32e312a6949299549e1121d891d83e9c3821b37f0f202bba5f01"
+BRIDGE_RELEASE_FILE = ".snapgen_bridge_release.json"
 MAIN_BRIDGE_HOST = "127.0.0.1"
 REQUIRED_APP_PACKAGES = (
     ("PIL", "Pillow"),
@@ -63,27 +67,71 @@ def _download(url: str, destination: Path, log):
 def _bridge_source_ok(path: Path) -> bool:
     return (path / "pyproject.toml").is_file() and (path / "chatgpt_api").is_dir()
 
+def _bridge_release_ok(path: Path) -> bool:
+    try:
+        data = json.loads((path / BRIDGE_RELEASE_FILE).read_text(encoding="utf-8"))
+        return _bridge_source_ok(path) and str(data.get("version")) == BRIDGE_RELEASE_VERSION
+    except (OSError, ValueError, TypeError):
+        return False
 
-def _install_bridge_source(bridge_dir: Path, log):
-    """Install from GitHub ZIP, so Git is never a prerequisite."""
-    if _bridge_source_ok(bridge_dir):
-        log(f"✓ พบซอร์ส Bridge: {bridge_dir}")
+
+def _install_bridge_source(bridge_dir: Path, log, *, refresh=False):
+    """Install pinned company Bridge without touching accounts or outputs."""
+    if _bridge_release_ok(bridge_dir) and not refresh:
+        log(f"✓ Bridge รุ่น {BRIDGE_RELEASE_VERSION} พร้อม")
         return
     bridge_dir.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="snapgen-bridge-") as td:
         temp = Path(td)
         archive = temp / "bridge.zip"
         _download(BRIDGE_ZIP_URL, archive, log)
+        actual_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if actual_hash != BRIDGE_ZIP_SHA256:
+            raise RuntimeError(f"ไฟล์ Bridge เสียหรือไม่ตรงรุ่น: SHA256={actual_hash}")
         with zipfile.ZipFile(archive) as zf:
             zf.extractall(temp / "extract")
         roots = [p for p in (temp / "extract").iterdir() if p.is_dir()]
-        if not roots or not _bridge_source_ok(roots[0]):
+        if not roots or not _bridge_release_ok(roots[0]):
             raise RuntimeError("ไฟล์ Bridge ที่ดาวน์โหลดมาไม่สมบูรณ์")
         # Overlay source only; existing secrets/accounts and outputs survive.
+        # refresh=True repairs old Bridge code on ordinary user machines
+        # without deleting account captures or forcing a second login.
         shutil.copytree(roots[0], bridge_dir, dirs_exist_ok=True)
-    if not _bridge_source_ok(bridge_dir):
-        raise RuntimeError("ติดตั้งซอร์ส Bridge แล้วแต่ตรวจไฟล์หลักไม่พบ")
-    log(f"✓ ดาวน์โหลด Bridge แล้ว: {bridge_dir}")
+    if not _bridge_release_ok(bridge_dir):
+        raise RuntimeError("ติดตั้ง Bridge แล้วแต่รุ่นไม่ตรง")
+    log(f"✓ ติดตั้ง Bridge รุ่น {BRIDGE_RELEASE_VERSION} แล้ว")
+
+def refresh_bridge_source(bridge_dir, log=print):
+    """Refresh executable Bridge code while preserving user accounts/data."""
+    bridge = Path(bridge_dir).expanduser().resolve()
+    _install_bridge_source(bridge, log, refresh=True)
+    return _ensure_bridge_venv(bridge, log)
+
+def bridge_release_ready(bridge_dir) -> bool:
+    """Return True only for exact Bridge source shipped to every workstation."""
+    return _bridge_release_ok(Path(bridge_dir).expanduser().resolve())
+
+
+def rebuild_bridge_runtime(bridge_dir, log=print):
+    """Rebuild executable Bridge code/venv while preserving accounts and data."""
+    bridge = Path(bridge_dir).expanduser().resolve()
+    # Account captures live under secrets/. Never remove that folder.
+    for relative in ("chatgpt_api", "chatgpt_api.egg-info", ".venv"):
+        target = (bridge / relative).resolve()
+        if target.parent != bridge:
+            raise RuntimeError(f"พาธซ่อม Bridge ไม่ปลอดภัย: {target}")
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=False)
+        elif target.exists():
+            target.unlink()
+    for cache in bridge.rglob("__pycache__") if bridge.is_dir() else ():
+        try:
+            shutil.rmtree(cache, ignore_errors=True)
+        except OSError:
+            pass
+    log("ล้างเฉพาะ Bridge runtime แล้ว — เก็บ Account เดิมไว้")
+    _install_bridge_source(bridge, log, refresh=True)
+    return _ensure_bridge_venv(bridge, log)
 
 
 def _ensure_bridge_venv(bridge_dir: Path, log) -> Path:
@@ -129,6 +177,50 @@ def _find_curl(project_root: Path):
         return bundled
     system = shutil.which("curl.exe") or shutil.which("curl")
     return Path(system) if system else None
+
+def _find_gh(project_root: Path):
+    bundled = project_root / "snapgen_data" / "tools" / "gh" / "bin" / "gh.exe"
+    if bundled.is_file():
+        return bundled
+    system = shutil.which("gh.exe") or shutil.which("gh")
+    return Path(system) if system else None
+
+def _ensure_gh(project_root: Path, log) -> Path:
+    existing = _find_gh(project_root)
+    if existing:
+        return existing
+    arch = os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64").upper()
+    wanted = "windows_arm64.zip" if "ARM64" in arch else "windows_amd64.zip"
+    request = urllib.request.Request(
+        "https://api.github.com/repos/cli/cli/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "SnapGen-System-Repair/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        release = json.loads(response.read().decode("utf-8", "replace"))
+    asset = next(
+        (item for item in release.get("assets", []) if str(item.get("name", "")).lower().endswith(wanted)),
+        None,
+    )
+    if not asset or not asset.get("browser_download_url"):
+        raise RuntimeError("หา GitHub CLI สำหรับ Windows รุ่นล่าสุดไม่พบ")
+    target = project_root / "snapgen_data" / "tools" / "gh"
+    with tempfile.TemporaryDirectory(prefix="snapgen-gh-") as td:
+        temp = Path(td)
+        archive = temp / "gh.zip"
+        _download(asset["browser_download_url"], archive, log)
+        with zipfile.ZipFile(archive) as zf:
+            zf.extractall(temp / "extract")
+        matches = list((temp / "extract").rglob("gh.exe"))
+        if not matches:
+            raise RuntimeError("ดาวน์โหลด GitHub CLI แล้วแต่ไม่พบ gh.exe")
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(matches[0].parent, target / "bin", dirs_exist_ok=True)
+    gh = target / "bin" / "gh.exe"
+    if not gh.is_file():
+        raise RuntimeError("ติดตั้ง GitHub CLI แบบพกพาไม่สำเร็จ")
+    os.environ["PATH"] = str(gh.parent) + os.pathsep + os.environ.get("PATH", "")
+    log(f"✓ ติดตั้ง GitHub CLI แบบพกพาแล้ว: {gh}")
+    return gh
 
 
 def _ensure_curl(project_root: Path, log) -> Path:
@@ -351,11 +443,11 @@ def _start_bridge(bridge_dir: Path, bridge_python: Path, log, host=MAIN_BRIDGE_H
     env = os.environ.copy()
     env["CHATGPT_API_KEY"] = "local-dev-key"
     env["CHATGPT_ACCOUNTS_DIR"] = "./secrets/accounts"
-    env["CHATGPT_ACCOUNT_STRATEGY"] = "sticky"
+    env["CHATGPT_ACCOUNT_STRATEGY"] = "auto"
     command = [
         bridge_python, "-m", "chatgpt_api", "serve", "--host", "0.0.0.0",
         "--port", "8000", "--api-key", "local-dev-key",
-        "--account-strategy", "sticky", "--normal-chat",
+        "--account-strategy", "auto", "--web-timeout", "600", "--normal-chat",
     ]
     if accounts:
         env["CHATGPT_ACCOUNT"] = accounts[0]
@@ -422,6 +514,16 @@ def repair_all(project_root, bridge_dir=None, log=print, patch_bridge=None, brid
     except Exception as exc:
         failures.append(f"curl: {exc}")
         log(f"✗ curl: {exc}")
+
+    try:
+        gh = _ensure_gh(root, log)
+        auth = _run([gh, "auth", "status", "--hostname", "github.com"], timeout=20)
+        if auth.returncode:
+            log("⚠ GitHub ยังไม่ได้ Login — Error จะเก็บคิวในเครื่องและส่งหลัง Login")
+        else:
+            log("✓ ระบบรายงาน Error กลางพร้อมส่ง GitHub Issues")
+    except Exception as exc:
+        log(f"⚠ ตรวจระบบรายงาน Error ไม่สำเร็จ: {exc}")
 
     try:
         if not _find_ffmpeg(root):

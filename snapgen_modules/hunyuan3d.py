@@ -32,6 +32,7 @@ import secrets
 import string
 import subprocess
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -138,6 +139,23 @@ class Hunyuan3DClient:
             return json.loads(out)
         except json.JSONDecodeError:
             raise Hunyuan3DError(f"Invalid JSON: {out[:500]}")
+
+    def daily_quota(self) -> dict[str, Any]:
+        """Return today's free Hunyuan 3D quota without creating a task."""
+        cookies = _parse_netscape_cookies(self.cookie_file)
+        user_id = cookies.get("hy_user") or cookies.get("hunyuan_user") or self.user_id
+        old_user_id = self.user_id
+        self.user_id = user_id
+        try:
+            return self._curl(
+                "POST",
+                f"{API_BASE}/api/3d/quotainfo",
+                [*self._signed_headers(), "-H", f"User-Agent: {self._ua}", "-H", f"Trace-Id: {uuid.uuid4().hex}"],
+                json.dumps({"sceneType": "3dCreations"}, separators=(",", ":")),
+                timeout=20,
+            )
+        finally:
+            self.user_id = old_user_id
 
     # ── text2image ──────────────────────────────────────────────
 

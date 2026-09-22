@@ -4,6 +4,17 @@ cd /d "%~dp0"
 title SnapGen - Auto Setup ^& Run
 color 0A
 
+REM Keep the project root clean on every machine. These folders are required
+REM by SnapGen, so hide rather than delete them. Only known disposable root
+REM logs/debug dumps are removed; never touch export or snapgen_data contents.
+for %%D in (.git .venv312 assets docs snapgen_data snapgen_modules tools vendor __pycache__) do (
+  if exist "%%D" attrib +h "%%D" >nul 2>nul
+)
+if exist ".gitignore" attrib +h ".gitignore" >nul 2>nul
+for %%F in (err.log out.log stderr.log stdout.log run_out.txt module_dis.txt) do (
+  if exist "%%F" del /q "%%F" >nul 2>nul
+)
+
 echo ============================================
 echo   SnapGen Auto Setup ^& Run
 echo   Check + Install everything automatically
@@ -417,6 +428,33 @@ if errorlevel 1 (
 )
 echo   qcloud_cos OK
 
+REM GitHub CLI sends privacy-filtered error reports from every workstation.
+REM Missing/login failures never block SnapGen; reports remain queued locally.
+where gh >nul 2>nul
+if errorlevel 1 if exist "snapgen_data\tools\gh\bin\gh.exe" set "PATH=%CD%\snapgen_data\tools\gh\bin;%PATH%"
+where gh >nul 2>nul
+if errorlevel 1 (
+  where winget >nul 2>nul
+  if not errorlevel 1 (
+    echo   Installing GitHub CLI for automatic error reports...
+    winget install --id GitHub.cli -e --accept-package-agreements --accept-source-agreements --silent >nul 2>nul
+  )
+)
+where gh >nul 2>nul
+if errorlevel 1 (
+  echo   [WARN] GitHub CLI not ready. Errors will stay queued until Repair installs it.
+) else (
+  gh auth status --hostname github.com >nul 2>nul
+  if errorlevel 1 (
+    echo   Opening browser once for automatic error reports...
+    gh auth login --hostname github.com --git-protocol https --web --clipboard
+    gh auth status --hostname github.com >nul 2>nul
+    if errorlevel 1 echo   [WARN] Browser approval not finished. SnapGen will ask again only when an error must be sent.
+  ) else (
+    echo   GitHub error reporting ready
+  )
+)
+
 REM ===== Step 5: Verify everything =====
 echo.
 REM ===== Step 5: Verify project files =====
@@ -445,6 +483,14 @@ if not exist "snapgen_modules\snapgen_page_image.py" (
 )
 if not exist "snapgen_modules\snapgen_page_prop.py" (
   echo   [FAIL] Missing: snapgen_modules\snapgen_page_prop.py
+  set "MISSING_PROJECT=1"
+)
+if not exist "snapgen_modules\snapgen_error_reporter.py" (
+  echo   [FAIL] Missing: snapgen_modules\snapgen_error_reporter.py
+  set "MISSING_PROJECT=1"
+)
+if not exist "snapgen_modules\snapgen_bridge_cursor_patch.py" (
+  echo   [FAIL] Missing: snapgen_modules\snapgen_bridge_cursor_patch.py
   set "MISSING_PROJECT=1"
 )
 if not exist "snapgen_modules\ai_slow2x.py" (

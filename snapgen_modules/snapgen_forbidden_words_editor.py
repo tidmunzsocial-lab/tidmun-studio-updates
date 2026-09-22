@@ -6,12 +6,17 @@ users can edit, enable/disable, and push the forbidden-word list to GitHub.
 """
 from __future__ import annotations
 
-import json, os, subprocess, sys, time, urllib.request
+import base64, json, os, subprocess, threading, time, urllib.request
 from pathlib import Path
 from tkinter import Toplevel, Frame, Label, Entry, Button, Listbox, Scrollbar, Checkbutton, BooleanVar, StringVar, messagebox, END
+from snapgen_fonts import font_family as _snapgen_font_family
+
+SNAPGEN_UI_FONT = _snapgen_font_family()
 
 REPO = "tidmunzsocial-lab/tidmun-studio-updates"
 BRANCH = "main"
+REMOTE_PATH = "assets/video_forbidden_words.json"
+SYNC_TTL_SECONDS = 600
 
 
 def _load_json(path: Path):
@@ -29,63 +34,95 @@ def _save_json(path: Path, data):
 
 
 
+def _normalise(data):
+    if not isinstance(data, dict) or not isinstance(data.get("words"), list):
+        raise ValueError("รูปแบบข้อมูลคำต้องห้ามไม่ถูกต้อง")
+    words = []
+    seen = set()
+    for value in data["words"]:
+        word = str(value).strip()
+        key = word.casefold()
+        if word and key not in seen:
+            seen.add(key)
+            words.append(word)
+    return {
+        "enabled": bool(data.get("enabled", True)),
+        "match_case": bool(data.get("match_case", False)),
+        "words": words,
+    }
+
+def _fetch_remote_data():
+    """Read shared data without requiring GitHub login on client machines."""
+    url = (
+        f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/{REMOTE_PATH}"
+        f"?t={int(time.time())}"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "SnapGen-forbidden-words"})
+    with urllib.request.urlopen(request, timeout=10) as resp:
+        return _normalise(json.loads(resp.read().decode("utf-8-sig")))
+
 def _fetch_from_github(json_path: Path) -> bool:
-    """Download latest forbidden words from GitHub on startup."""
+    """Download latest shared words without updating program files."""
     try:
-        url = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/assets/video_forbidden_words.json"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        if isinstance(data, dict) and "words" in data:
+        data = _fetch_remote_data()
+        if data != _load_json(json_path):
             _save_json(json_path, data)
-            if os.environ.get("SNAPGEN_VERBOSE_STARTUP") == "1":
-                print(f"[SnapGen] forbidden words fetched from GitHub: {len(data['words'])} words")
-            return True
-    except Exception as e:
-        print(f"[SnapGen] forbidden words fetch skipped: {e}")
-    return False
-
-def _publish_to_github(json_path: Path, log_fn):
-    """Commit and push video_forbidden_words.json to the update repository."""
-    try:
-        import subprocess
-        # Find a git repo that contains this file (project root)
-        project_root = json_path.parent.parent
-        git_dir = project_root / ".git"
-        if not git_dir.is_dir():
-            log_fn("⚠️  ไม่พบ Git repository ในโปรเจค — อัปเดต GitHub ไม่ได้")
-            return False
-
-        # Stage only the forbidden words file
-        subprocess.run(["git", "-C", str(project_root), "add", str(json_path)],
-                       capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
-        # Commit
-        r = subprocess.run(
-            ["git", "-C", str(project_root), "commit", "-m", "Update video forbidden words"],
-            capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace"
-        )
-        if r.returncode != 0 and "nothing to commit" not in (r.stdout + r.stderr).lower():
-            err = (r.stderr or "")[-300:]
-            log_fn(f"⚠️  Git commit ไม่สำเร็จ: {err}")
-            return False
-        # Push
-        r = subprocess.run(
-            ["git", "-C", str(project_root), "push", "origin", BRANCH],
-            capture_output=True, text=True, timeout=120, encoding="utf-8", errors="replace"
-        )
-        if r.returncode != 0:
-            err = (r.stderr or "")[-300:]
-            log_fn(f"⚠️  Git push ไม่สำเร็จ: {err}")
-            return False
-        log_fn("✅ อัปเดต GitHub สำเร็จ")
         return True
     except Exception as e:
-        log_fn(f"⚠️  GitHub update error: {e}")
-        return False
+        if os.environ.get("SNAPGEN_VERBOSE_STARTUP") == "1":
+            print(f"[SnapGen] forbidden words sync skipped: {e}")
+    return False
+
+def _publish_to_github(local_data, baseline, log_fn):
+    """Update only the shared JSON through GitHub API; never commit program files."""
+    try:
+        remote = _fetch_remote_data()
+        baseline_words = {word.casefold(): word for word in baseline.get("words", [])}
+        local_words = {word.casefold(): word for word in local_data.get("words", [])}
+        remote_words = {word.casefold(): word for word in remote.get("words", [])}
+        additions = set(local_words) - set(baseline_words)
+        deletions = set(baseline_words) - set(local_words)
+        for key in additions:
+            remote_words[key] = local_words[key]
+        for key in deletions:
+            remote_words.pop(key, None)
+        merged = _normalise({
+            "enabled": local_data["enabled"],
+            "match_case": local_data["match_case"],
+            "words": list(remote_words.values()),
+        })
+
+        info = subprocess.run(
+            ["gh", "api", "--method", "GET", f"repos/{REPO}/contents/{REMOTE_PATH}", "-f", f"ref={BRANCH}"],
+            capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
+        )
+        if info.returncode != 0:
+            raise RuntimeError("เครื่องนี้ยังไม่ได้ Login GitHub หรือไม่มีสิทธิ์แก้รายการ")
+        sha = json.loads(info.stdout)["sha"]
+        payload = json.dumps(merged, ensure_ascii=False, indent=2).encode("utf-8")
+        result = subprocess.run(
+            [
+                "gh", "api", "--method", "PUT", f"repos/{REPO}/contents/{REMOTE_PATH}",
+                "-f", "message=Update shared video forbidden words",
+                "-f", f"content={base64.b64encode(payload).decode('ascii')}",
+                "-f", f"sha={sha}", "-f", f"branch={BRANCH}",
+            ],
+            capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace",
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or "GitHub ไม่รับข้อมูล")[-300:])
+        log_fn("✅ ข้อมูลกลางออนไลน์แล้ว")
+        return merged
+    except Exception as e:
+        log_fn(f"⚠️  อัปเดตข้อมูลกลางไม่ได้: {e}")
+        return None
 
 
 def open_editor(root, json_path, reload_fn=None):
     json_path = Path(json_path)
     data = _load_json(json_path)
+    baseline = dict(data)
+    baseline["words"] = list(data.get("words", []))
 
     win = Toplevel(root)
     win.title("จัดการคำต้องห้ามในช่องวิดีโอ")
@@ -93,7 +130,7 @@ def open_editor(root, json_path, reload_fn=None):
     win.transient(root)
     win.grab_set()
 
-    Label(win, text="คำต้องห้าม ( forbidden words )", font=("Leelawadee UI", 12, "bold")).pack(pady=10)
+    Label(win, text="คำต้องห้าม ( forbidden words )", font=(SNAPGEN_UI_FONT, 12, "bold")).pack(pady=10)
 
     enabled_var = BooleanVar(value=data.get("enabled", True))
     case_var = BooleanVar(value=data.get("match_case", False))
@@ -107,7 +144,7 @@ def open_editor(root, json_path, reload_fn=None):
     scrollbar = Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
 
-    lb = Listbox(frame, yscrollcommand=scrollbar.set, font=("Leelawadee UI", 11))
+    lb = Listbox(frame, yscrollcommand=scrollbar.set, font=(SNAPGEN_UI_FONT, 11))
     lb.pack(side="left", fill="both", expand=True)
     scrollbar.config(command=lb.yview)
 
@@ -115,12 +152,12 @@ def open_editor(root, json_path, reload_fn=None):
         lb.insert(END, w)
 
     entry_var = StringVar()
-    entry = Entry(win, textvariable=entry_var, font=("Leelawadee UI", 11))
+    entry = Entry(win, textvariable=entry_var, font=(SNAPGEN_UI_FONT, 11))
     entry.pack(fill="x", padx=20, pady=5)
     entry.bind("<Return>", lambda _e: add_word())
 
-    status_var = StringVar(value="พร้อม")
-    status = Label(win, textvariable=status_var, fg="gray", font=("Leelawadee UI", 9))
+    status_var = StringVar(value="ออนไลน์ — ดึงข้อมูลเมื่อเปิดหน้านี้")
+    status = Label(win, textvariable=status_var, fg="gray", font=(SNAPGEN_UI_FONT, 9))
     status.pack(pady=2)
 
     def set_status(msg, color="gray"):
@@ -156,17 +193,31 @@ def open_editor(root, json_path, reload_fn=None):
             "words": words,
         }
         _save_json(json_path, new_data)
-        set_status("💾 บันทึกไฟล์แล้ว — กำลังอัปเดต GitHub...", "blue")
-        win.update()
+        set_status("กำลังส่งข้อมูลกลาง...", "blue")
+        save_btn.config(state="disabled")
 
-        _publish_to_github(json_path, lambda m: set_status(m, "blue"))
-
-        if callable(reload_fn):
+        def worker():
+            messages = []
+            merged = _publish_to_github(new_data, baseline, messages.append)
+            def done():
+                save_btn.config(state="normal")
+                if merged:
+                    _save_json(json_path, merged)
+                    baseline.clear()
+                    baseline.update(merged)
+                    if callable(reload_fn):
+                        try:
+                            reload_fn()
+                        except Exception:
+                            pass
+                    set_status("ออนไลน์แล้ว — เครื่องอื่นจะเห็นเมื่อเปิดส่วนนี้", "green")
+                else:
+                    set_status(messages[-1] if messages else "อัปเดตข้อมูลกลางไม่ได้", "red")
             try:
-                reload_fn()
+                root.after(0, done)
             except Exception:
                 pass
-        set_status("✅ เสร็จสิ้น", "green")
+        threading.Thread(target=worker, daemon=True).start()
 
     btn_frame = Frame(win)
     btn_frame.pack(fill="x", padx=20, pady=5)
@@ -174,8 +225,11 @@ def open_editor(root, json_path, reload_fn=None):
     Button(btn_frame, text="➕ เพิ่ม", command=add_word, bg="#16A34A", fg="white").pack(side="left", padx=3)
     Button(btn_frame, text="🗑 ลบ", command=remove_word, bg="#DC2626", fg="white").pack(side="left", padx=3)
 
-    Button(win, text="💾 บันทึก + อัปเดต GitHub", command=save_and_push,
-           bg="#2563EB", fg="white", font=("Leelawadee UI", 10, "bold"), padx=20, pady=8).pack(pady=15)
+    save_btn = Button(
+        win, text="💾 บันทึกข้อมูลกลาง", command=save_and_push,
+        bg="#2563EB", fg="white", font=(SNAPGEN_UI_FONT, 10, "bold"), padx=20, pady=8,
+    )
+    save_btn.pack(pady=15)
 
 
 def install_button(root, g, json_path):
@@ -183,12 +237,53 @@ def install_button(root, g, json_path):
     try:
         import tkinter as tk
         json_path = Path(json_path)
-        # Fetch latest from GitHub on every startup
-        _fetch_from_github(json_path)
+        # Shared-data sync is independent from program updates. Every running
+        # machine reads the same GitHub JSON; only an explicit Save writes it.
+        sync_busy = [False]
+        last_sync = [0.0]
+
+        def sync_shared_data(force=False, after=None):
+            if not force and time.time() - last_sync[0] < SYNC_TTL_SECONDS:
+                if callable(after):
+                    after()
+                return
+            if sync_busy[0]:
+                if callable(after):
+                    root.after(250, lambda: sync_shared_data(force=True, after=after))
+                return
+            sync_busy[0] = True
+
+            def worker():
+                before = _load_json(json_path)
+                ok = _fetch_from_github(json_path)
+                changed = ok and _load_json(json_path) != before
+                def done():
+                    sync_busy[0] = False
+                    if ok:
+                        last_sync[0] = time.time()
+                    if changed:
+                        reload = g.get("reload_video_forbidden_words")
+                        if callable(reload):
+                            try:
+                                reload()
+                            except Exception:
+                                pass
+                    if callable(after):
+                        after()
+                try:
+                    root.after(0, done)
+                except Exception:
+                    pass
+            threading.Thread(target=worker, daemon=True).start()
+
+        sync_shared_data(force=True)
 
         def on_click():
             reload = g.get("reload_video_forbidden_words")
-            open_editor(root, json_path, reload_fn=reload)
+            sync_shared_data(
+                force=True,
+                after=lambda: open_editor(root, json_path, reload_fn=reload),
+            )
 
         parent = g.get("slots") or root
         btn = tk.Button(
@@ -197,7 +292,7 @@ def install_button(root, g, json_path):
             command=on_click,
             bg="#DC2626",
             fg="white",
-            font=("Leelawadee UI", 9, "bold"),
+            font=(SNAPGEN_UI_FONT, 9, "bold"),
             relief="flat",
             bd=0,
             cursor="hand2",
@@ -242,6 +337,7 @@ def install_button(root, g, json_path):
                 result = None
             try:
                 if str(mode).lower() == "video":
+                    sync_shared_data()
                     w = parent.winfo_width()
                     btn.place(relx=1.0, x=-10, y=4, anchor='ne')
                 else:

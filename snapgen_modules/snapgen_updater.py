@@ -9,7 +9,7 @@ DEVELOPER CONTRACT:
 - Restore is for program files only; it is not a local Backup system.
 - Never add export, snapgen_data, cookies, accounts, Chrome profiles, or
   user-created files to ALLOWED_ROOT_FILES / ALLOWED_MODULE_SUFFIXES.
-- See docs/PROGRAM_ARCHITECTURE_NOTES.md before changing this workflow.
+- See กฏของโปรแกรม/PROGRAM_ARCHITECTURE_NOTES.md before changing this workflow.
 """
 from __future__ import annotations
 

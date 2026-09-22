@@ -14,7 +14,7 @@
   - `tests/test_character_visual_bible_integration.py`
   - `tests/test_character_wardrobe_context.py`
   - `tests/test_prompt_ref_visual_normalization.py`
-  - `docs/PROMPT_REF_CONTEXT_SYSTEM.md`
+  - `กฏของโปรแกรม/PROMPT_REF_CONTEXT_SYSTEM.md`
   - `docs/work-reports/2026-08-08_final-character-visual-bible-architecture.md`
   - `docs/work-reports/LATEST.md`
 - Important Changes:

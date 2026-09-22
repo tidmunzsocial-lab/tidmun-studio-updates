@@ -6,7 +6,7 @@ Single source of truth — fix once, all pages benefit.
 No dependency on pyc internals. Uses urllib.request directly (no curl subprocess).
 """
 
-import os, json, time, threading, urllib.request, urllib.error, base64, shutil
+import os, json, time, threading, urllib.request, urllib.error, base64, shutil, hashlib
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,7 +14,9 @@ from pathlib import Path
 # ── Config (override via set_config) ──────────────────────────────
 BRIDGE_URL = "http://127.0.0.1:8000"
 BRIDGE_KEY = "local-dev-key"
-MODEL = "gpt-5-5"
+# Account-aware: the Bridge resolves the best supported model for the active
+# Go/Plus/Pro capture instead of pinning one model ID that may return 404.
+MODEL = "auto"
 DEFAULT_OUTPUT_DIR = None  # set at runtime
 TIMEOUT = 300  # seconds per request
 RETRY_COUNT = 0
@@ -25,7 +27,712 @@ _queue_lock = threading.Lock()
 _active_count = 0
 _active_lock = threading.Lock()
 _log_fn = None  # callable(msg: str)
+_story_state_lock = threading.Lock()
+_STORY_STATE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "snapgen_data"
+    / "meta"
+    / "image_story_conversation.json"
+)
+_story_conversation = {
+    "conversation_id": None, "parent_message_id": None,
+    "account_alias": "",
+    "story_title": "", "story_hash": "",
+    "storyboard_hash": "", "storyboard_path": "",
+    "storyboard_conversation_id": "",
+}
+_REF_STORY_STATE_PATH = _STORY_STATE_PATH.with_name("ref_story_conversation.json")
+_ref_story_conversation = {
+    "conversation_id": None, "parent_message_id": None,
+    "account_alias": "",
+    "story_title": "", "story_hash": "",
+}
+_STORY_FACE_STATE_PATH = _STORY_STATE_PATH.with_name("story_face_conversation.json")
+_story_face_conversation = {
+    "conversation_id": None, "parent_message_id": None,
+    "account_alias": "",
+    "story_title": "", "story_hash": "",
+}
+_PROP_STATE_PATH = _STORY_STATE_PATH.with_name("prop_conversation.json")
+_prop_conversation = {"conversation_id": None, "parent_message_id": None, "account_alias": ""}
 
+def _story_hash(content):
+    normalized = bytes(content or b"").decode("utf-8", errors="replace")
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+def _title_from_story_content(content, fallback="เรื่องจาก Prompt-Ref"):
+    """Use the exact uploaded story bytes as title source; UI/Context may be stale."""
+    text = bytes(content or b"").decode("utf-8", errors="replace")
+    for line in text.splitlines():
+        value = line.strip().lstrip("#").strip()
+        if value:
+            return value[:60]
+    return str(fallback or "เรื่องจาก Prompt-Ref").strip()[:60]
+
+def _current_source_hash():
+    try:
+        return _story_hash(_STORY_STATE_PATH.parent.parent.joinpath("prompt_ref_source.txt").read_bytes())
+    except OSError:
+        return ""
+
+def _load_conversation(path, target):
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("conversation_id") and raw.get("parent_message_id"):
+            for key in target:
+                target[key] = str(raw.get(key) or "")
+    except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, AttributeError):
+        pass
+
+def _save_conversation(path, state):
+    with _story_state_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(".tmp")
+        temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp_path.replace(path)
+
+def _valid_story_title(state):
+    current_hash = _current_source_hash()
+    if not (state.get("conversation_id") and state.get("parent_message_id")):
+        return ""
+    saved_hash = state.get("story_hash")
+    if saved_hash != current_hash:
+        # Migrate state written before hashes normalized trailing whitespace.
+        try:
+            source_bytes = _STORY_STATE_PATH.parent.parent.joinpath("prompt_ref_source.txt").read_bytes()
+            legacy_hash = hashlib.sha256(source_bytes).hexdigest()
+        except OSError:
+            legacy_hash = ""
+        if saved_hash and saved_hash == legacy_hash and current_hash:
+            state["story_hash"] = current_hash
+            if state is _story_conversation:
+                _save_story_conversation()
+            elif state is _ref_story_conversation:
+                _save_ref_story_conversation()
+        else:
+            return ""
+    if not current_hash:
+        return ""
+    return str(state.get("story_title") or "").strip()
+
+
+def _load_story_conversation():
+    """Load only Image AI's conversation ids; never prompt/image content."""
+    _load_conversation(_STORY_STATE_PATH, _story_conversation)
+
+
+def _save_story_conversation():
+    """Persist Image AI's ids so closing SnapGen does not start a new history."""
+    _save_conversation(_STORY_STATE_PATH, _story_conversation)
+
+
+def reset_story_conversation():
+    """Start a new Image AI history. This is the only normal history reset."""
+    _story_conversation.update(
+        conversation_id=None,
+        parent_message_id=None,
+        account_alias="",
+        story_title="",
+        story_hash="",
+        storyboard_hash="",
+        storyboard_path="",
+        storyboard_conversation_id="",
+    )
+    _save_story_conversation()
+
+
+def has_story_conversation():
+    """Return whether Image AI has a complete persisted conversation cursor."""
+    return bool(_valid_story_title(_story_conversation))
+
+def get_story_title():
+    return _valid_story_title(_story_conversation)
+
+def _load_ref_story_conversation():
+    _load_conversation(_REF_STORY_STATE_PATH, _ref_story_conversation)
+
+def _save_ref_story_conversation():
+    _save_conversation(_REF_STORY_STATE_PATH, _ref_story_conversation)
+
+def reset_ref_story_conversation():
+    _ref_story_conversation.update(conversation_id=None, parent_message_id=None, account_alias="", story_title="", story_hash="")
+    _save_ref_story_conversation()
+
+def has_ref_story_conversation():
+    return bool(_valid_story_title(_ref_story_conversation))
+
+def get_ref_story_title():
+    return _valid_story_title(_ref_story_conversation)
+
+def _load_story_face_conversation():
+    _load_conversation(_STORY_FACE_STATE_PATH, _story_face_conversation)
+
+def _save_story_face_conversation():
+    _save_conversation(_STORY_FACE_STATE_PATH, _story_face_conversation)
+
+def reset_story_face_conversation():
+    """Reset only Story 3D history; Image AI and Ref histories stay untouched."""
+    _story_face_conversation.update(conversation_id=None, parent_message_id=None, account_alias="", story_title="", story_hash="")
+    _save_story_face_conversation()
+
+def has_story_face_conversation():
+    return bool(
+        _story_face_conversation.get("conversation_id")
+        and _story_face_conversation.get("parent_message_id")
+        and _story_face_conversation.get("story_title")
+    )
+
+def get_story_face_title():
+    return str(_story_face_conversation.get("story_title") or "").strip() if has_story_face_conversation() else ""
+
+def get_story_face_hash():
+    return str(_story_face_conversation.get("story_hash") or "").strip() if has_story_face_conversation() else ""
+
+def _load_prop_conversation():
+    _load_conversation(_PROP_STATE_PATH, _prop_conversation)
+
+def _save_prop_conversation():
+    _save_conversation(_PROP_STATE_PATH, _prop_conversation)
+
+def reset_prop_conversation():
+    """Reset only Prop page history; other page histories stay untouched."""
+    _prop_conversation.update(conversation_id=None, parent_message_id=None, account_alias="")
+    _save_prop_conversation()
+
+
+_load_story_conversation()
+_load_ref_story_conversation()
+_load_story_face_conversation()
+_load_prop_conversation()
+
+
+def ingest_story_context(ref_images, *, log_fn=None, storyboard_panel_mode=False):
+    """Upload prior-event images into the current story chat without generating.
+
+    The returned conversation/message ids become the parent of the next image
+    request, so storyboard context is learned before character refs are sent.
+    """
+    images = list(ref_images or [])[:10]
+    if not images:
+        raise RuntimeError("ไม่มีรูปบริบทเหตุการณ์ให้ส่ง")
+    log = log_fn or _log
+    if storyboard_panel_mode:
+        prompt = (
+            "These attached images are STORYBOARD REFERENCES. For the next image-generation "
+            "request, use only the storyboard panel/slot number specified in that request. "
+            "Generate the image to match that exact panel as closely as possible, including "
+            "composition, camera angle, framing, character placement, action, location, props, "
+            "wardrobe, and lighting. Do not summarize, reinterpret, or use the storyboard as "
+            "overall narrative context. Do not generate an image now. Reply only CONTEXT_READY."
+        )
+    else:
+        prompt = (
+            "These attached images are previous-event context for the same story. Study them "
+            "before the next image request and preserve the latest relevant continuity. Do not "
+            "generate an image now. Reply only CONTEXT_READY."
+        )
+    payload = {
+        "model": MODEL,
+        "mode": "custom",
+        "prompt": prompt,
+        "images": images,
+    }
+    if _story_conversation["conversation_id"] and _story_conversation.get("account_alias"):
+        payload["metadata"] = {
+            "conversation_id": _story_conversation["conversation_id"],
+            "parent_message_id": _story_conversation["parent_message_id"],
+        }
+        payload["chatgpt_account"] = _story_conversation["account_alias"]
+    req = urllib.request.Request(
+        f"{BRIDGE_URL}/v1/chatgpt/vision",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {BRIDGE_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    log("[บริบท] กำลังส่งเหตุการณ์ก่อนหน้าเข้า GPT...")
+    try:
+        with _queue_lock:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"ส่งบริบทไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"ส่งบริบทไม่สำเร็จ: {exc}") from exc
+    if isinstance(result.get("error"), dict):
+        raise RuntimeError(str(result["error"].get("message") or result["error"]))
+    conversation_id = result.get("conversation_id")
+    parent_message_id = result.get("parent_message_id")
+    if not conversation_id or not parent_message_id:
+        raise RuntimeError("Bridge รับรูปแล้วแต่ไม่ส่งรหัสประวัติกลับมา กรุณารีสตาร์ต Bridge")
+    _story_conversation["conversation_id"] = conversation_id
+    _story_conversation["parent_message_id"] = parent_message_id
+    _story_conversation["account_alias"] = str(result.get("chatgpt_account") or "")
+    _save_story_conversation()
+    summary = str(result.get("text") or "").strip()
+    log("[บริบท] GPT รับรู้เหตุการณ์ก่อนหน้าแล้ว")
+    if summary:
+        log("[บริบท] " + summary[:240])
+    return {
+        "conversation_id": conversation_id,
+        "parent_message_id": parent_message_id,
+        "summary": summary,
+    }
+
+
+
+
+def ensure_latest_storyboard_context(*, log_fn=None):
+    """Register the latest Prompt-Ref storyboard once in Image AI history.
+
+    A storyboard is sent only when its file hash changes or Image AI switches to
+    another conversation. The acknowledged turn becomes the parent for the next
+    image-generation request.
+    """
+    meta_path = _STORY_STATE_PATH.parent.parent / "prompt_ref_storyboard_image.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        return {"sent": False, "reason": "no_storyboard_meta"}
+
+    source = Path(str(meta.get("image_path") or "")).expanduser()
+    try:
+        source = source.resolve()
+    except OSError:
+        pass
+    if not source.is_file() or source.stat().st_size <= 0:
+        return {"sent": False, "reason": "no_storyboard_image"}
+
+    log = log_fn or _log
+    if not has_story_conversation():
+        story_path = _STORY_STATE_PATH.parent.parent / "prompt_ref_source.txt"
+        try:
+            story_bytes = story_path.read_bytes()
+        except OSError as exc:
+            raise RuntimeError("ไม่พบบท Prompt-Ref สำหรับเริ่มประวัติ Image AI อัตโนมัติ") from exc
+        if not story_bytes.strip():
+            raise RuntimeError("บท Prompt-Ref ว่าง จึงส่ง Storyboard เข้า Image AI ไม่ได้")
+        log("[Storyboard Context] ยังไม่มีประวัติ Image AI — เริ่มจากบท Prompt-Ref อัตโนมัติ...")
+        reset_story_conversation()
+        ingest_story_file(
+            _title_from_story_content(story_bytes),
+            story_path.name,
+            story_bytes,
+            log_fn=log,
+        )
+
+    # Include the instruction version so a changed storyboard-use rule is sent
+    # once again even when the image file itself has not changed.
+    digest = hashlib.sha256(source.read_bytes() + b"|storyboard-panel-direct-v2").hexdigest()
+    conversation_id = str(_story_conversation.get("conversation_id") or "").strip()
+    already_registered = (
+        str(_story_conversation.get("storyboard_hash") or "") == digest
+        and str(_story_conversation.get("storyboard_conversation_id") or "") == conversation_id
+    )
+    if already_registered:
+        return {
+            "sent": False,
+            "reason": "same_storyboard",
+            "storyboard_hash": digest,
+            "storyboard_path": str(source),
+        }
+
+    try:
+        from PIL import Image
+        import io
+        with Image.open(source) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=84, optimize=True)
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    except Exception as exc:
+        raise RuntimeError(f"เตรียม Storyboard สำหรับ Image AI ไม่สำเร็จ: {exc}") from exc
+
+    log("[Storyboard Context] พบ Storyboard ใหม่ — ส่งให้ Image AI รับรู้ก่อนสร้างรูป...")
+    result = ingest_story_context([encoded], log_fn=log, storyboard_panel_mode=True)
+    acknowledgement = str(result.get("summary") or "").strip()
+    if not acknowledgement:
+        raise RuntimeError("Image AI รับ Storyboard แล้วแต่ไม่ตอบยืนยัน")
+
+    _story_conversation["storyboard_hash"] = digest
+    _story_conversation["storyboard_path"] = str(source)
+    _story_conversation["storyboard_conversation_id"] = str(
+        _story_conversation.get("conversation_id") or ""
+    )
+    _save_story_conversation()
+    log("[Storyboard Context] ✓ Image AI รับรู้ Storyboard ใหม่แล้ว")
+    return {
+        "sent": True,
+        "reason": "new_storyboard",
+        "storyboard_hash": digest,
+        "storyboard_path": str(source),
+        "acknowledgement": acknowledgement,
+    }
+
+
+def _video_prompt_instruction(current_prompt="", prevent_turn_back=False):
+    draft = str(current_prompt or "").strip()
+    instruction = (
+        "Look carefully at the attached image and the draft video prompt below. "
+        "Write one concise, model-neutral video prompt in English, using 1 to 3 sentences "
+        "and no more than 80 words. State what the image shows, the main visible action "
+        "or natural motion and the visual continuity to preserve. "
+        "Do not choose, describe, or mention camera movement in the output. Leave camera movement "
+        "unspecified because SnapGen's Camera dropdown controls it. Ignore any camera instruction "
+        "in the draft, including zoom, push-in, pull-out, pan, tilt, dolly, tracking, handheld, "
+        "or static-camera wording. Never add a camera movement by default. "
+        "Use the image as the visual truth and keep the draft's original intent. "
+        "Do not invent people, events, props, text, or details that are not supported by the image or draft. "
+        "Do not mention model names, settings, aspect ratios, analysis, or these instructions. "
+        "Output only the final video prompt."
+    )
+    if draft:
+        instruction += "\n\nDRAFT VIDEO PROMPT:\n" + draft
+    else:
+        instruction += "\n\nThere is no draft prompt. Describe the image and propose one simple, natural video action."
+    if prevent_turn_back:
+        instruction += (
+            "\n\nPreserve the starting back-facing view throughout the clip; "
+            "the subject must not turn the head or face toward the camera."
+        )
+    return instruction
+
+
+def _compact_video_prompt(answer, max_words=80):
+    words = str(answer or "").strip().split()
+    if len(words) <= max_words:
+        return " ".join(words)
+    return " ".join(words[:max_words]).rstrip(" ,;:") + "."
+
+
+def generate_video_prompt_from_story_image(
+    image_path,
+    *,
+    current_prompt="",
+    slot_number=None,
+    prevent_turn_back=False,
+    model_name="",
+    log_fn=None,
+):
+    """Attach the real Slot image directly to Image AI's story chat once."""
+    source = Path(str(image_path or "")).expanduser().resolve()
+    if not source.is_file():
+        raise RuntimeError(f"ไม่พบรูปใน Slot: {source}")
+    if not has_story_conversation():
+        raise RuntimeError("ยังไม่มีประวัติเรื่องของหน้า Image AI — กด 'เริ่มประวัติใหม่' และส่งบทก่อน")
+
+    log = log_fn or _log
+    slot_text = f"Slot {int(slot_number)}" if slot_number is not None else "Video Slot"
+    try:
+        import io
+        from PIL import Image
+        with Image.open(source) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=82, optimize=True)
+            image_bytes = buffer.getvalue()
+    except Exception as exc:
+        raise RuntimeError(f"เตรียมรูปสำหรับ GPT ไม่สำเร็จ: {exc}") from exc
+
+    prompt = _video_prompt_instruction(
+        current_prompt=current_prompt,
+        prevent_turn_back=prevent_turn_back,
+    )
+
+    requested_conversation_id = str(_story_conversation.get("conversation_id") or "").strip()
+    payload = {
+        "model": "chatgpt-web/auto",
+        "thinking_effort": "standard",
+        "mode": "custom",
+        "prompt": prompt,
+        "input_images": [{
+            "name": "slot_video_prompt.jpg",
+            "data_url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"),
+        }],
+        "metadata": {
+            "conversation_id": requested_conversation_id,
+            "parent_message_id": _story_conversation["parent_message_id"],
+        },
+    }
+
+    log(f"[GPT Video Prompt] กำลังส่งรูปของ {slot_text} เข้าแชตเรื่องเดิมโดยตรง...")
+    try:
+        with _queue_lock:
+            # Use the newest cursor when this request reaches the queue.
+            payload["metadata"] = {
+                "conversation_id": _story_conversation["conversation_id"],
+                "parent_message_id": _story_conversation["parent_message_id"],
+            }
+            request = urllib.request.Request(
+                f"{BRIDGE_URL}/v1/chatgpt/vision",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {BRIDGE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:900]
+        raise RuntimeError(f"สร้าง Video Prompt ไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"สร้าง Video Prompt ไม่สำเร็จ: {exc}") from exc
+
+    if isinstance(result.get("error"), dict):
+        raise RuntimeError(str(result["error"].get("message") or result["error"]))
+    conversation_id = str(result.get("conversation_id") or "").strip()
+    parent_message_id = str(result.get("parent_message_id") or "").strip()
+    if not conversation_id or not parent_message_id:
+        raise RuntimeError("Bridge ตอบกลับแต่ไม่คืนรหัสประวัติ")
+    if conversation_id != requested_conversation_id:
+        raise RuntimeError("Bridge เปิดแชตใหม่แทนประวัติเรื่องหลัก — ยกเลิกผลลัพธ์")
+
+    answer = str(
+        result.get("text")
+        or ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
+        or ""
+    ).strip()
+    answer = answer.replace("```text", "").replace("```markdown", "").replace("```", "").strip()
+    answer = answer.strip('"“”` ')
+    answer = re.sub(
+        r"(?is)^\s*(?:video\s*prompt|prompt\s*วิดีโอ|วิดีโอ\s*prompt)\s*[:：\-–—]*\s*",
+        "",
+        answer,
+    ).strip()
+    if len(answer) < 20:
+        raise RuntimeError("GPT คืน Video Prompt สั้นหรือว่างเกินไป")
+    answer = _compact_video_prompt(answer)
+    if prevent_turn_back and "must not turn the head" not in answer.lower():
+        answer = answer.rstrip(" .") + (
+            " The subject must remain facing away throughout the clip and must not turn "
+            "the head or face toward the camera."
+        )
+
+    _story_conversation["conversation_id"] = conversation_id
+    _story_conversation["parent_message_id"] = parent_message_id
+    _story_conversation["account_alias"] = str(result.get("chatgpt_account") or "")
+    _save_story_conversation()
+    log(f"[GPT Video Prompt] พร้อมแล้วสำหรับ {slot_text}")
+    return answer
+
+def generate_prompt_ref_storyboard_json_from_image(
+    image_path,
+    *,
+    prompt,
+    conversation_id,
+    parent_message_id,
+    account_alias="",
+    log_fn=None,
+):
+    """Use the exact working GPT Video Prompt vision route for Prompt-Ref JSON."""
+    source = Path(str(image_path or "")).expanduser().resolve()
+    if not source.is_file():
+        raise RuntimeError(f"ไม่พบรูป Storyboard: {source}")
+    conversation_id = str(conversation_id or "").strip()
+    parent_message_id = str(parent_message_id or "").strip()
+    if not conversation_id or not parent_message_id:
+        raise RuntimeError("Prompt-Ref ไม่มี conversation cursor สำหรับส่งรูป")
+    prompt = str(prompt or "").strip()
+    if not prompt:
+        raise RuntimeError("คำสั่งแตก Prompt ว่าง")
+
+    log = log_fn or _log
+    try:
+        import io
+        from PIL import Image
+        with Image.open(source) as image:
+            image = image.convert("RGB")
+            image.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=82, optimize=True)
+            image_bytes = buffer.getvalue()
+    except Exception as exc:
+        raise RuntimeError(f"เตรียมรูป Storyboard สำหรับ GPT ไม่สำเร็จ: {exc}") from exc
+
+    payload = {
+        "model": "auto",
+        "mode": "custom",
+        "prompt": prompt,
+        "input_images": [{
+            "name": "prompt_ref_storyboard.jpg",
+            "data_url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"),
+        }],
+        "metadata": {
+            "conversation_id": conversation_id,
+            "parent_message_id": parent_message_id,
+        },
+    }
+    account_alias = str(account_alias or "").strip()
+    if account_alias:
+        payload["chatgpt_account"] = account_alias
+
+    log("[Prompt-Ref Storyboard] ส่งรูปด้วย vision route เดียวกับปุ่ม GPT Video Prompt...")
+    try:
+        with _queue_lock:
+            request = urllib.request.Request(
+                f"{BRIDGE_URL}/v1/chatgpt/vision",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {BRIDGE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:1800]
+        raise RuntimeError(f"แตก Prompt จาก Storyboard ไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"แตก Prompt จาก Storyboard ไม่สำเร็จ: {exc}") from exc
+
+    if isinstance(result.get("error"), dict):
+        raise RuntimeError(str(result["error"].get("message") or result["error"]))
+    returned_conversation_id = str(result.get("conversation_id") or "").strip()
+    returned_parent_message_id = str(result.get("parent_message_id") or "").strip()
+    if not returned_conversation_id or not returned_parent_message_id:
+        raise RuntimeError("Bridge ตอบกลับแต่ไม่คืนรหัสประวัติ Prompt-Ref")
+    if returned_conversation_id != conversation_id:
+        raise RuntimeError("Bridge เปิดแชตใหม่แทน Prompt-Ref เดิม — ยกเลิกผลลัพธ์")
+    returned_account = str(result.get("chatgpt_account") or "").strip()
+    if account_alias and returned_account and returned_account != account_alias:
+        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับ Prompt-Ref เดิม")
+
+    answer = str(
+        result.get("text")
+        or ((result.get("choices") or [{}])[0].get("message") or {}).get("content")
+        or ""
+    ).strip()
+    if not answer:
+        raise RuntimeError("GPT คืนคำตอบว่างจากรูป Storyboard")
+    log("[Prompt-Ref Storyboard] GPT ส่งคำตอบกลับแล้ว")
+    return {
+        "text": answer,
+        "conversation_id": returned_conversation_id,
+        "parent_message_id": returned_parent_message_id,
+        "chatgpt_account": returned_account,
+    }
+
+def _ingest_story_file_into(
+    state, save_fn, story_title, filename, file_bytes, *, purpose,
+    log_fn=None, attach_file=True, instruction_override=None,
+):
+    name = str(filename or "story.txt").strip() or "story.txt"
+    content = bytes(file_bytes or b"")
+    if not content:
+        raise RuntimeError("ไฟล์บทว่าง")
+    title = _title_from_story_content(content, story_title)
+    log = log_fn or _log
+    instruction = str(instruction_override or "").strip() or (
+        f"นี่คือบททั้งเรื่องชื่อ '{title}' สำหรับ{purpose}ของ SnapGen "
+        "อ่านให้ครบและจำตัวละคร บทบาท ความสัมพันธ์ ยุค ฐานะ รูปลักษณ์ เสื้อผ้าที่เหมาะกับเหตุการณ์ "
+        "สถานที่ และข้อเท็จจริงของเรื่องไว้ในประวัตินี้ ยังไม่ต้องสร้างภาพ ตอบ STORY_READY พร้อมสรุปหนึ่งประโยค"
+    )
+    if attach_file:
+        message_content = [
+            {"type": "input_file", "filename": name, "mime_type": "text/plain; charset=utf-8",
+             "file_data": base64.b64encode(content).decode("ascii")},
+            {"type": "input_text", "text": instruction},
+        ]
+    else:
+        story_text = content.decode("utf-8", errors="replace")
+        message_content = instruction + "\n\n--- บทเต็ม ---\n" + story_text
+    payload = {
+        "model": "chatgpt-web/auto",
+        "messages": [{"role": "user", "content": message_content}],
+        "history_and_training_disabled": False,
+        "metadata": {"chatgpt_image_intercept": False},
+    }
+    req = urllib.request.Request(
+        f"{BRIDGE_URL}/v1/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Authorization": f"Bearer {BRIDGE_KEY}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    log(f"[บทเรื่อง] กำลังส่งบท {name} เข้า GPT...")
+    try:
+        with _queue_lock:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"ส่งบทไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"ส่งบทไม่สำเร็จ: {exc}") from exc
+    if isinstance(result.get("error"), dict):
+        raise RuntimeError(str(result["error"].get("message") or result["error"]))
+    conversation_id = result.get("conversation_id")
+    parent_message_id = result.get("parent_message_id")
+    if not conversation_id or not parent_message_id:
+        raise RuntimeError("Bridge รับบทแล้วแต่ไม่ส่งรหัสประวัติกลับมา")
+    state["conversation_id"] = str(conversation_id)
+    state["parent_message_id"] = str(parent_message_id)
+    state["account_alias"] = str(result.get("chatgpt_account") or "")
+    state["story_title"] = title
+    state["story_hash"] = _story_hash(content)
+    save_fn()
+    message = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or result.get("text") or ""
+    summary = str(message).strip()
+    log(f"[บทเรื่อง] GPT พร้อมสำหรับเรื่อง: {title}")
+    if summary:
+        log("[บทเรื่อง] " + summary[:240])
+    return {
+        "conversation_id": conversation_id,
+        "parent_message_id": parent_message_id,
+        "summary": summary,
+        "story_title": title,
+        "story_hash": state["story_hash"],
+    }
+
+def ingest_story_file(story_title, filename, file_bytes, *, log_fn=None):
+    """Upload a complete story file before Image AI starts generating scenes."""
+    return _ingest_story_file_into(
+        _story_conversation, _save_story_conversation,
+        story_title, filename, file_bytes,
+        purpose="งานสร้างภาพและวิดีโอต่อเนื่อง", log_fn=log_fn, attach_file=False,
+    )
+
+def ingest_ref_story_file(story_title, filename, file_bytes, *, log_fn=None):
+    """Upload current Prompt-Ref story into Ref's independent GPT history."""
+    reset_ref_story_conversation()
+    return _ingest_story_file_into(
+        _ref_story_conversation, _save_ref_story_conversation,
+        story_title, filename, file_bytes,
+        purpose="งานออกแบบ Ref ตัวละครและสถานที่", log_fn=log_fn,
+    )
+
+def ingest_story_face_file(story_title, filename, file_bytes, *, log_fn=None):
+    """Start Story 3D's independent history from its own dataset."""
+    reset_story_face_conversation()
+    return _ingest_story_file_into(
+        _story_face_conversation, _save_story_face_conversation,
+        story_title, filename, file_bytes,
+        purpose="งานนิทาน 3D ใบหน้าตัวละครและเสื้อผ้า", log_fn=log_fn,
+    )
+
+
+def analyze_story_face_dataset(story_title, text, instruction, *, log_fn=None):
+    """Analyze Story Face rows inside the history later used to generate faces."""
+    reset_story_face_conversation()
+    return _ingest_story_file_into(
+        _story_face_conversation,
+        _save_story_face_conversation,
+        story_title,
+        "story-face-dataset.txt",
+        str(text or "").encode("utf-8"),
+        purpose="วิเคราะห์ Character Bible และสร้างใบหน้าตัวละคร",
+        log_fn=log_fn,
+        attach_file=False,
+        instruction_override=instruction,
+    )
 
 def set_config(*, bridge_url=None, bridge_key=None, model=None,
                output_dir=None, timeout=None, retry_count=None,
@@ -95,16 +802,16 @@ def _scene_slug(text, max_len=64):
         flags=re.I,
     )
     raw = re.sub(
-        r"^\s*(?:(?:extreme\s+)?(?:close[- ]?up|medium(?:\s+wide|\s+close[- ]?up)?|wide|long|full)\s+shot\s*)?"
-        r"(?:เลนส์\s*\d+\s*mm\s*)?"
-        r"(?:มุม(?:ระดับสายตา|สูง(?:เล็กน้อย)?|ต่ำ(?:เล็กน้อย)?|ด้านข้าง|ตรง|เฉียง)\s*)?",
+        r"^\s*(?:(?:extreme\s+)?(?:close[- ]?up|medium(?:\s+wide|\s+close[- ]?up|\s+long)?|wide|long|full)(?:\s+shot)?\s*)?"
+        r"(?:(?:lens|เลนส์)\s*\d+\s*mm\s*)?"
+        r"(?:(?:camera\s+angle|กล้อง|มุมกล้อง|มุม)(?:ระดับสายตา|สูง(?:เล็กน้อย)?|ต่ำ(?:เล็กน้อย)?|ด้านข้าง|ตรง|เฉียง|eye[- ]?level)?\s*)?",
         "",
         raw,
         flags=re.I,
     )
     cut_markers = (
         "ภาพนิ่ง", "cinematic", "wide shot", "medium shot", "close-up",
-        "เลนส์", "lens", "foreground", "midground", "background",
+        "กล้อง", "มุมกล้อง", "เลนส์", "lens", "foreground", "midground", "background",
         "shot", "perspective", "camera", "lighting", "โทนภาพ",
     )
     lowered = raw.lower()
@@ -218,7 +925,10 @@ def _recover_new_artifact(before_ids, started_at, out_dir, name_hint, prompt, lo
 
 def generate_image(prompt, *, output_dir=None, name_hint=None,
                    is_edit=False, ref_images=None, aspect_ratio="1:1",
-                   save_sidecar=True, log_fn=None):
+                   save_sidecar=True, log_fn=None, use_story_history=False,
+                   use_ref_story_history=False, use_story_face_history=False,
+                   use_prop_history=False, conversation_state=None,
+                   conversation_save_fn=None):
     """Generate one image via chatgpt-api bridge.
 
     Returns local path to downloaded image, or raises RuntimeError.
@@ -232,8 +942,15 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
         aspect_ratio: "1:1", "16:9", "9:16", etc.
         save_sidecar: save .txt sidecar with prompt
         log_fn: per-call log function (falls back to global _log_fn)
+        use_story_history: continue and update Image AI's persistent story chat.
+            Keep False for Ref, Prop, Story Face, video slots, and other pages.
     """
     log = log_fn or _log
+
+    # Image AI automatically registers the newest Prompt-Ref storyboard once
+    # before creating the first scene from it. The same file is not resent.
+    if use_story_history:
+        ensure_latest_storyboard_context(log_fn=log)
 
     # ── Build payload ──────────────────────────────────────────
     # A detailed cinematic prompt by itself can make ChatGPT answer with text
@@ -241,6 +958,14 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
     # the user explicitly asks it to create an image, so enforce that same
     # intent centrally for every SnapGen page without changing visual details.
     submitted_prompt = str(prompt or "").strip()
+    aspect_ratio = str(aspect_ratio or "1:1").strip()
+    if aspect_ratio != "1:1":
+        orientation = "portrait vertical" if aspect_ratio in {"9:16", "3:4", "2:3"} else "landscape horizontal"
+        submitted_prompt = (
+            f"OUTPUT CANVAS LOCK: {aspect_ratio} {orientation}. "
+            f"The final image itself must use exactly this aspect ratio; do not place a {aspect_ratio} image inside another canvas.\n\n"
+            + submitted_prompt
+        )
 
     if not re.match(r"^(?:สร้าง|วาด|generate|create|make)\s*(?:รูป|ภาพ|image|an?\s+image)", submitted_prompt, re.I):
         action = "แก้ไขและสร้างรูปภาพใหม่จริงหนึ่งรูป" if is_edit else "สร้างรูปภาพจริงหนึ่งรูป"
@@ -254,13 +979,50 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
         "model": MODEL,
         "prompt": submitted_prompt,
         "n": 1,
-        "size": "1024x1024",
+        "size": {
+            "9:16": "1024x1792",
+            "16:9": "1792x1024",
+            "3:4": "1024x1792",
+            "2:3": "1024x1792",
+            "4:3": "1792x1024",
+            "3:2": "1792x1024",
+        }.get(aspect_ratio, "1024x1024"),
         "response_format": "b64_json",
     }
     if is_edit and ref_images:
         payload["images"] = ref_images
     if aspect_ratio and aspect_ratio != "1:1":
         payload["aspect_ratio"] = aspect_ratio
+    if use_story_history and _story_conversation["conversation_id"] and _story_conversation.get("account_alias"):
+        payload["metadata"] = {
+            "conversation_id": _story_conversation["conversation_id"],
+            "parent_message_id": _story_conversation["parent_message_id"],
+        }
+        payload["chatgpt_account"] = _story_conversation["account_alias"]
+    elif use_ref_story_history and _ref_story_conversation["conversation_id"] and _ref_story_conversation.get("account_alias"):
+        payload["metadata"] = {
+            "conversation_id": _ref_story_conversation["conversation_id"],
+            "parent_message_id": _ref_story_conversation["parent_message_id"],
+        }
+        payload["chatgpt_account"] = _ref_story_conversation["account_alias"]
+    elif use_story_face_history and _story_face_conversation["conversation_id"] and _story_face_conversation.get("account_alias"):
+        payload["metadata"] = {
+            "conversation_id": _story_face_conversation["conversation_id"],
+            "parent_message_id": _story_face_conversation["parent_message_id"],
+        }
+        payload["chatgpt_account"] = _story_face_conversation["account_alias"]
+    elif use_prop_history and _prop_conversation["conversation_id"] and _prop_conversation.get("account_alias"):
+        payload["metadata"] = {
+            "conversation_id": _prop_conversation["conversation_id"],
+            "parent_message_id": _prop_conversation["parent_message_id"],
+        }
+        payload["chatgpt_account"] = _prop_conversation["account_alias"]
+    elif isinstance(conversation_state, dict) and conversation_state.get("conversation_id") and conversation_state.get("account_alias"):
+        payload["metadata"] = {
+            "conversation_id": conversation_state["conversation_id"],
+            "parent_message_id": conversation_state["parent_message_id"],
+        }
+        payload["chatgpt_account"] = conversation_state["account_alias"]
 
     # ── Output dir ─────────────────────────────────────────────
     out_dir = Path(output_dir or DEFAULT_OUTPUT_DIR or os.path.join(os.getcwd(), "ai_images"))
@@ -288,6 +1050,29 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
             # protected only Request construction, so another page could send
             # an image job while this request was still running.
             with _queue_lock:
+                # Read the newest cursor only when this request reaches the
+                # queue. Jobs started close together must continue from the
+                # immediately previous result, not branch from a stale parent.
+                current_history = None
+                if use_story_history:
+                    current_history = _story_conversation
+                elif use_ref_story_history:
+                    current_history = _ref_story_conversation
+                elif use_story_face_history:
+                    current_history = _story_face_conversation
+                elif use_prop_history:
+                    current_history = _prop_conversation
+                elif isinstance(conversation_state, dict):
+                    current_history = conversation_state
+                if current_history and current_history.get("conversation_id") and current_history.get("account_alias"):
+                    payload["metadata"] = {
+                        "conversation_id": current_history["conversation_id"],
+                        "parent_message_id": current_history["parent_message_id"],
+                    }
+                    payload["chatgpt_account"] = current_history["account_alias"]
+                elif current_history is not None:
+                    payload.pop("metadata", None)
+                    payload.pop("chatgpt_account", None)
                 request_started = time.time()
                 artifact_ids_before = _artifact_snapshot()
                 data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -312,6 +1097,54 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
             data_list = result.get("data", [])
             if not data_list:
                 raise RuntimeError("Bridge returned no data (empty response)")
+            if use_story_history:
+                if result.get("conversation_id"):
+                    _story_conversation["conversation_id"] = result["conversation_id"]
+                if result.get("parent_message_id"):
+                    _story_conversation["parent_message_id"] = result["parent_message_id"]
+                if result.get("chatgpt_account"):
+                    _story_conversation["account_alias"] = result["chatgpt_account"]
+                if (
+                    _story_conversation["conversation_id"]
+                    and _story_conversation["parent_message_id"]
+                ):
+                    _save_story_conversation()
+            elif use_ref_story_history:
+                if result.get("conversation_id"):
+                    _ref_story_conversation["conversation_id"] = result["conversation_id"]
+                if result.get("parent_message_id"):
+                    _ref_story_conversation["parent_message_id"] = result["parent_message_id"]
+                if result.get("chatgpt_account"):
+                    _ref_story_conversation["account_alias"] = result["chatgpt_account"]
+                if _ref_story_conversation["conversation_id"] and _ref_story_conversation["parent_message_id"]:
+                    _save_ref_story_conversation()
+            elif use_story_face_history:
+                if result.get("conversation_id"):
+                    _story_face_conversation["conversation_id"] = result["conversation_id"]
+                if result.get("parent_message_id"):
+                    _story_face_conversation["parent_message_id"] = result["parent_message_id"]
+                if result.get("chatgpt_account"):
+                    _story_face_conversation["account_alias"] = result["chatgpt_account"]
+                if _story_face_conversation["conversation_id"] and _story_face_conversation["parent_message_id"]:
+                    _save_story_face_conversation()
+            elif use_prop_history:
+                if result.get("conversation_id"):
+                    _prop_conversation["conversation_id"] = result["conversation_id"]
+                if result.get("parent_message_id"):
+                    _prop_conversation["parent_message_id"] = result["parent_message_id"]
+                if result.get("chatgpt_account"):
+                    _prop_conversation["account_alias"] = result["chatgpt_account"]
+                if _prop_conversation["conversation_id"] and _prop_conversation["parent_message_id"]:
+                    _save_prop_conversation()
+            elif isinstance(conversation_state, dict):
+                if result.get("conversation_id"):
+                    conversation_state["conversation_id"] = str(result["conversation_id"])
+                if result.get("parent_message_id"):
+                    conversation_state["parent_message_id"] = str(result["parent_message_id"])
+                if result.get("chatgpt_account"):
+                    conversation_state["account_alias"] = str(result["chatgpt_account"])
+                if callable(conversation_save_fn):
+                    conversation_save_fn()
 
             slug = _scene_slug(str(name_hint or prompt), max_len=64)
             ext = ".png"
@@ -334,7 +1167,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
 
             # ── Save sidecar ───────────────────────────────────
             if save_sidecar:
-                sidecar = out_dir / f"{ts}-{slug}.txt"
+                sidecar = dest.with_suffix(".txt")
                 sidecar.write_text(prompt, encoding="utf-8")
 
             log(f"[image-gen] ✓ {dest}")

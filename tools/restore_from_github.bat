@@ -1,7 +1,12 @@
 @echo off
 setlocal
 set "REPO=https://github.com/tidmunzsocial-lab/tidmun-studio-updates.git"
-set "TARGET=%~dp0SnapGen"
+for %%I in ("%~dp0..") do set "PROJECT_ROOT=%%~fI"
+if exist "%PROJECT_ROOT%\setup_and_run.bat" (
+  set "TARGET=%PROJECT_ROOT%"
+) else (
+  set "TARGET=%~dp0SnapGen"
+)
 
 echo SnapGen recovery from GitHub
 echo Target: %TARGET%

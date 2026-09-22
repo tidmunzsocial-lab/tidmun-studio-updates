@@ -21,6 +21,20 @@ tools/release/
 # Runtime status and logs
 snapgen_update_last.json
 *.log
+run_out.txt
+module_dis.txt
+test_artifacts/
+tests/
+snapgen_data/error_reports/
+
+# Local credentials and machine-specific configuration
+ltx_cloud.json
+minimax_cloud.json
+snapgen_vast_ed25519
+snapgen_vast_ed25519.pub
+.claude/
+.codex/
+STATE.md
 
 # Shortcuts and OS files
 *.lnk
@@ -32,3 +46,21 @@ desktop.ini
 .idea/
 *.swp
 *.swo
+
+# Local cleanup artefacts (do not add to the repository)
+/snapgen_backups/
+/snapgen_modules/*.bak_*
+/tools/ffmpeg-*/
+/tools/**/__pycache__/
+/__slot_dis.txt
+/desktop_now.png
+/sftp_*.txt
+
+# Root-only test artefacts (do not add to the repository)
+/.pytest_cache/
+/test_artifacts/
+/test_outputs/
+/test_*.py
+/test_*.mp4
+/temp_*.jpg
+/snapgen_*.png

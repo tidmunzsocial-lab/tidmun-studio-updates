@@ -61,14 +61,14 @@ Prompt-Ref เป็นเจ้าของ **เรื่องหลัก + 
 
 ### Storyboard transport evidence/tests
 
-- `docs/PROMPT_REF_STORYBOARD_TRANSPORT.md`
+- `กฏของโปรแกรม/PROMPT_REF_STORYBOARD_TRANSPORT.md`
 - `tests/test_prompt_ref_single_history.py`
 - `tests/test_storyboard_split_prompt_banks.py`
 - `tests/test_storyboard_ref_preview.py`
 
 ### Legacy/alternate browser helper
 
-- `snapgen_prompt_ref_browser.py`
+- `tools/snapgen_prompt_ref_browser.py`
   - มี CDP helper `ask_json_in_prompt_ref()`
   - จากการค้นใน working tree ปัจจุบันยังไม่พบ caller อื่น จึงควรถือเป็น helper/alternate path ไม่ใช่ active path โดยอัตโนมัติ
 
@@ -408,13 +408,13 @@ Prompt-Ref semantic layer สร้าง categorized v4 แต่ `snapgen_cont
 
 ### B. Storyboard transport document vs active Vision implementation
 
-`docs/PROMPT_REF_STORYBOARD_TRANSPORT.md` ระบุ contract ที่ Storyboard image analysis อยู่ใน Prompt-Ref conversation เดิมผ่าน captured Web transport
+`กฏของโปรแกรม/PROMPT_REF_STORYBOARD_TRANSPORT.md` ระบุ contract ที่ Storyboard image analysis อยู่ใน Prompt-Ref conversation เดิมผ่าน captured Web transport
 
 แต่ implementation ที่พบใน `_generate_prompts_from_storyboard_image()` ปัจจุบันส่ง Vision request แบบ temporary แล้วจึง writeback JSON แบบ text-only เข้า Prompt-Ref history เดิม
 
 อย่าแก้ฝ่ายใดฝ่ายหนึ่งจากเอกสารเพียงอย่างเดียว ต้องตรวจ runtime/Bridge contract และ tests ก่อน เพราะนี่อาจเป็น intentional compatibility workaround หรือ documentation drift
 
-### C. `snapgen_prompt_ref_browser.py`
+### C. `tools/snapgen_prompt_ref_browser.py`
 
 มี direct CDP helper สำหรับอ่าน JSON ใน Prompt-Ref conversation แต่ไม่พบ caller จาก search ปัจจุบัน จึงอย่าถือว่าเป็น active path จนกว่าจะเจอ call site/runtime wiring
 

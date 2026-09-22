@@ -26,6 +26,10 @@ All pages look identical. All buttons look identical. Never hardcode colors agai
 """
 from __future__ import annotations
 
+from snapgen_fonts import font_family as _snapgen_font_family
+
+SNAPGEN_UI_FONT = _snapgen_font_family()
+
 import tkinter as tk
 from tkinter import ttk
 from typing import Callable
@@ -39,12 +43,12 @@ PAGE_PADX = 16
 PAGE_PADY = 16
 LABELFRAME_PADX = 12
 LABELFRAME_PADY = 12
-LABELFRAME_FONT = ("Leelawadee UI", 11, "bold")
+LABELFRAME_FONT = (SNAPGEN_UI_FONT, 11, "bold")
 LABEL_FG = "#1A1A1A"
 LABEL_SUB_FG = "#555"
-LABEL_FONT = ("Leelawadee UI", 10)
-ENTRY_FONT = ("Leelawadee UI", 12)
-STATUS_FONT = ("Leelawadee UI", 9)
+LABEL_FONT = (SNAPGEN_UI_FONT, 10)
+ENTRY_FONT = (SNAPGEN_UI_FONT, 12)
+STATUS_FONT = (SNAPGEN_UI_FONT, 9)
 LOG_HEIGHT = 2
 
 _LOCK_LABELS = {
@@ -154,7 +158,7 @@ def make_selection_lock_bar(parent: tk.Misc, g: dict, *, bg: str = PAGE_BG) -> t
     g.setdefault("_selection_lock_vars", []).append(var)
     label = tk.Label(
         parent, textvariable=var, bg=bg, fg="#475569", anchor="w",
-        font=("Leelawadee UI", 9), padx=8, pady=4,
+        font=(SNAPGEN_UI_FONT, 9), padx=8, pady=4,
         highlightthickness=1, highlightbackground="#E2E8F0",
     )
     return label
@@ -250,7 +254,7 @@ def make_log_box(parent: tk.Misc, *, bg: str = "#FFFFFF") -> tk.Text:
         fg="#111827",
         relief="solid",
         bd=1,
-        font=("Leelawadee UI", 9),
+        font=(SNAPGEN_UI_FONT, 9),
         padx=8,
         pady=5,
         spacing1=1,
@@ -263,6 +267,11 @@ def append_log(box: tk.Text, message: object, *, max_lines: int = 200) -> None:
     text = " ".join(str(message or "").split()).strip()
     if not text:
         return
+    try:
+        import snapgen_error_reporter
+        snapgen_error_reporter.report_log(text, "page log")
+    except Exception:
+        pass
     try:
         box.configure(state="normal")
         box.insert(tk.END, text + "\n")

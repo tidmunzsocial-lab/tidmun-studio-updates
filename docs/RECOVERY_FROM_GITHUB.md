@@ -9,7 +9,7 @@ https://github.com/tidmunzsocial-lab/tidmun-studio-updates
 ## วิธีติดตั้งบนเครื่องใหม่
 
 1. ติดตั้ง Git for Windows
-2. ดาวน์โหลดไฟล์ `restore_from_github.bat` จาก repository
+2. ดาวน์โหลดไฟล์ `tools/restore_from_github.bat` จาก repository
 3. ดับเบิลคลิกไฟล์ โปรแกรมจะ clone source ลงโฟลเดอร์ `SnapGen`
 4. ระบบจะเรียก `setup_and_run.bat` เพื่อเตรียม Python และ dependencies ต่อให้อัตโนมัติ
 

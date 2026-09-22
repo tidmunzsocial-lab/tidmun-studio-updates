@@ -15,11 +15,12 @@ files = [
     # Nested layout targets for clean installs / migrated machines.
     ROOT / "__pycache__" / "snapgen_core.cpython-312.pyc",
     ROOT / "docs" / "INSTALL_OTHER_MACHINE.md",
-    ROOT / "docs" / "BRIDGE_TEAM_ARCHITECTURE.md",
-    ROOT / "docs" / "PROGRAM_ARCHITECTURE_NOTES.md",
+    ROOT / "กฏของโปรแกรม" / "BRIDGE_TEAM_ARCHITECTURE.md",
+    ROOT / "กฏของโปรแกรม" / "PROGRAM_ARCHITECTURE_NOTES.md",
     ROOT / "snapgen_data" / "meta" / "snapgen_version.json",
     ROOT / "assets" / "video_forbidden_words.json",
     *sorted((ROOT / "snapgen_modules").glob("*.py")),
+    *sorted((ROOT / "snapgen_modules" / "mobile").glob("*.*")),
 ]
 files = [p for p in files if p.is_file() and not p.name.startswith("test_")]
 

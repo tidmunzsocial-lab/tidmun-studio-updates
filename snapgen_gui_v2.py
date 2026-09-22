@@ -3,6 +3,8 @@
 Do not py_compile this file: it is only a loader for preserved .pyc.
 """
 import os, sys, marshal, tempfile, json, re, threading, subprocess, time, shutil, base64, hashlib
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 BASE_ROOT = Path(__file__).resolve().parent
@@ -83,6 +85,21 @@ if (
 # at BASE_ROOT.
 BASE = BASE_ROOT / "snapgen_data"
 BASE.mkdir(exist_ok=True)
+
+# Shared Storyboard provenance helpers are used by desktop, mobile, and the
+# Image page adapter.  Keeping these outside the recovered UI functions avoids
+# each entry point making a different reference/prompt decision.
+from snapgen_modules.story_consistency import (
+    atomic_json_write as _story_atomic_json_write,
+    authority_block as _story_authority_block,
+    canonical_identity_key as _story_canonical_identity_key,
+    current_scene_text as _story_current_scene_text,
+    is_storyboard_derived as _story_is_storyboard_derived,
+    load_run as _story_load_run,
+    new_run_id as _story_new_run_id,
+    save_run as _story_save_run,
+    storyboard_panel_crop as _storyboard_panel_crop,
+)
 
 def _migrate_root_layout():
     """Move legacy root files into the clean nested layout on every machine.
@@ -396,7 +413,7 @@ for _base in [
 #
 # Do not change Bridge binding, shared GPT-account behavior, Tailscale
 # behavior, or account strategy without explicit instructions from the owner.
-# See docs/BRIDGE_TEAM_ARCHITECTURE.md before changing Bridge networking.
+# See กฏของโปรแกรม/BRIDGE_TEAM_ARCHITECTURE.md before changing Bridge networking.
 # ---------------------------------------------------------------------------
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 8000
@@ -626,7 +643,7 @@ def _bridge_startup_sync():
             str(BRIDGE_PYTHON), "-m", "chatgpt_api", "serve",
             "--host", "0.0.0.0", "--port", str(BRIDGE_PORT),
             "--api-key", BRIDGE_API_KEY,
-            "--account-strategy", "sticky",
+            "--account-strategy", "auto",
             "--web-timeout", "600",
             "--chat-concurrency", "free=1,go=1,plus=1,pro=1",
             "--upload-concurrency", "free=1,go=1,plus=1,pro=1",
@@ -682,6 +699,16 @@ except Exception:
 _real_mainloop = tk.Misc.mainloop
 tk.Misc.mainloop = lambda self, n=0: None
 
+# The recovered core does not know every launcher-added video model and can
+# replace them with its default while loading config. Keep the user's saved
+# slot values so they can be restored immediately after the core starts.
+_saved_local_slot_configs = []
+try:
+    _startup_config = json.loads((BASE / "snapgen_config.json").read_text(encoding="utf-8"))
+    _saved_local_slot_configs = list(_startup_config.get("slot_configs") or [])
+except Exception:
+    pass
+
 # The recovered application core must not use Python's normal __pycache__
 # filename.  Running py_compile/IDEs may regenerate that cache and silently
 # replace the real app with bytecode for this small launcher.
@@ -708,6 +735,36 @@ g = {
 }
 exec(code, g)
 tk.Misc.mainloop = _real_mainloop
+try:
+    _local_model_ids = {
+        "ltx-2.3-local", "ltx-2.5-maestro", "vela-ai-video", "grok-lower",
+    }
+    _retired_local_model_ids = {"minimax-h3-local", "ltx-2.5-cloud"}
+    for _slot_index, _saved_slot in enumerate(_saved_local_slot_configs):
+        if _slot_index >= len(g.get("slot_cfg_vars") or []):
+            break
+        _saved_model = str(_saved_slot.get("model") or "")
+        if _saved_model in _retired_local_model_ids:
+            _saved_slot = dict(_saved_slot, model="ltx-2.5-maestro")
+            _saved_model = "ltx-2.5-maestro"
+        if _saved_model == "vela-ai-video":
+            _saved_slot = dict(_saved_slot, duration="5")
+        if _saved_model == "grok-lower" and str(_saved_slot.get("duration") or "") not in {"6", "10", "15"}:
+            _saved_slot = dict(_saved_slot, duration="6")
+        if _saved_model not in _local_model_ids:
+            continue
+        _runtime_slot = g["slot_cfg_vars"][_slot_index]
+        for _slot_key in ("model", "resolution", "duration", "aspect", "mode", "camera_movement", "dialogue"):
+            _slot_var = _runtime_slot.get(_slot_key)
+            if hasattr(_slot_var, "set") and _slot_key in _saved_slot:
+                _slot_var.set(str(_saved_slot[_slot_key]))
+        if _saved_model == "vela-ai-video" and hasattr(_runtime_slot.get("duration"), "set"):
+            _runtime_slot["duration"].set("5")
+    _save_slots = g.get("save_slot_configs")
+    if callable(_save_slots):
+        _save_slots()
+except Exception as _local_slot_restore_error:
+    print(f"[SnapGen] Local slot restore failed: {_local_slot_restore_error}", flush=True)
 
 # Override pyc's API base: each copy always uses its own local Bridge.
 g["_api_base"] = lambda: f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1"
@@ -717,6 +774,16 @@ g["CHATGPT_API_KEY"] = "local-dev-key"
 def _snapgen_friendly_bridge_error(msg):
     raw = str(msg)
     lowered = raw.casefold()
+    if "cloudflare browser challenge" in lowered or "chatgpt_browser_challenge" in lowered:
+        return (
+            "Cloudflare ปฏิเสธ Chrome session ก่อนคำขอถึง ChatGPT — SnapGen หยุดงานนี้และไม่ยิงซ้ำ\n\n"
+            "วิธีแก้:\n"
+            "1. กด ⚙ Settings > Bridge > เปิด SnapGen Browser\n"
+            "2. Sign in ChatGPT ในหน้าต่างนั้น แล้วจับ request สร้างรูปที่ทำงานสำเร็จใหม่\n"
+            "3. Restart Bridge แล้วลองอีกครั้ง\n"
+            "ถ้ายังเกิดซ้ำ แปลว่า capture แบบ replay ใช้กับ session นี้ไม่ได้และ Bridge ต้องใช้ browser-backed Chrome connector\n\n"
+            "รายละเอียดเดิม:\n" + raw
+        )
     if (
         "chatgpt_provider_error" in lowered
         and ("provider status: 500" in lowered or "conversation failed: 500" in lowered)
@@ -772,7 +839,9 @@ try:
     _imgmod.set_config(
         bridge_url=f"http://{BRIDGE_HOST}:{BRIDGE_PORT}",
         bridge_key="local-dev-key",
-        model="gpt-5-5",
+        # Let the Bridge resolve the model from the selected account/capture.
+        # Plan changes (Go/Plus/Pro) must not require editing this launcher.
+        model="auto",
         output_dir=str(EXPORT_IMAGE),
         # One click must equal one web image job.  Retrying a web job after a
         # client timeout can overlap the still-running ChatGPT task, consume
@@ -795,6 +864,7 @@ try:
     g["get_story_face_title"] = _imgmod.get_story_face_title
     g["get_story_face_hash"] = _imgmod.get_story_face_hash
     g["ingest_story_face_file"] = _imgmod.ingest_story_face_file
+    g["analyze_story_face_dataset"] = _imgmod.analyze_story_face_dataset
     def _new_do_image_request(payload, is_edit=False, prompt="", name_hint=None,
                                raw_prompt=None, prompt_index=None,
                                output_dir=None, save_sidecar=False):
@@ -1498,15 +1568,6 @@ if callable(_orig_append_log_safe):
             current_model_name = str(g["slot_cfg_vars"][index]["model"].get() or "").strip()
         except Exception:
             current_model_name = ""
-        # Local video models: keep the selected engine as the prompt target.
-        # If the user typed a prompt, refine that text instead of replacing it.
-        if current_prompt and current_model_name in (MINIMAX_H3_LOCAL_MODEL, MINIMAX_CLOUD_MODEL, LTX23_LOCAL_MODEL):
-            current_prompt = (
-                "REFINE USER VIDEO PROMPT. Preserve the user intention and context. "
-                "Improve cinematic details, motion, camera, timing, and continuity. "
-                "Do not rewrite the scene into a different event. User prompt:\n"
-                + current_prompt
-            )
         _video_prompt_ai_busy[index] = True
         _refresh_video_prompt_ai_button(index)
         try:
@@ -1800,6 +1861,9 @@ try:
 
     def _mute_download_enabled():
         try:
+            voice_cfg = (g.get("_veo3_voice_state") or {}).get(_current_video_slot[0], {})
+            if voice_cfg.get("enabled"):
+                return False
             var = g.get("mute_downloaded_video_var")
             return bool(var is not None and var.get())
         except Exception:
@@ -2311,6 +2375,20 @@ _actual_video_signature_by_slot = {}
 _actual_video_credit_samples = {}
 _video_credit_measure_lock = threading.Lock()
 VIDEO_ACTUAL_CREDIT_FILE = BASE / "video_actual_credits.json"
+VIDEO_AUTO_ASPECT = "อัตโนมัติ"
+VIDEO_AUTO_ASPECT_LABEL = "อัตโนมัติ (ตามรูป)"
+VIDEO_AUTO_ASPECT_STATE_FILE = BASE / "video_auto_aspect_state.json"
+from snapgen_vela_video import (
+    LABEL as VELA_VIDEO_LABEL,
+    MODEL as VELA_VIDEO_MODEL,
+    SUPPORTED_DURATION as VELA_VIDEO_DURATION,
+    build_command as _build_vela_video_command,
+    find_video_url as _find_vela_video_url,
+)
+from snapgen_grok_lower import (
+    SUPPORTED_DURATIONS as GROK_LOWER_DURATIONS,
+    request as _request_grok_lower,
+)
 ALLOWED_VIDEO_MODELS = {
     "veo-2",
     "veo-3",
@@ -2327,14 +2405,17 @@ ALLOWED_VIDEO_MODELS = {
     "grok-3",
     "grok-3-fast",
     "grok",
-    "minimax-h3-local",
-    "minimax-cloud",
+    "grok-lower",
+    VELA_VIDEO_MODEL,
     "ltx-2.3-local",
 }
 DEFAULT_VIDEO_MODEL = "veo-3.1-lite"
 VIDEO_MODEL_ALIASES = {
     "**bad**": DEFAULT_VIDEO_MODEL,
     "bad": DEFAULT_VIDEO_MODEL,
+    "minimax-h3-local": "ltx-2.5-maestro",
+    "ltx-2.3-cloud": "ltx-2.5-maestro",
+    "ltx-2.5-cloud": "ltx-2.5-maestro",
 }
 
 def _credit_number(value):
@@ -2384,6 +2465,214 @@ def _video_cfg_signature(cfg):
         val("aspect"),
         val("mode", "custom"),
     )
+
+
+def _video_aspect_choices(model):
+    model = str(model or "").strip()
+    if model in (LTX23_LOCAL_MODEL, LTX25_MAESTRO_MODEL, LTX23_CLOUD_MODEL):
+        return ("16:9", "9:16")
+    return ("16:9", "9:16", "1:1")
+
+
+def _detect_video_aspect(image_path, model):
+    """Choose the closest supported video ratio from the reference image."""
+    path = Path(str(image_path or "").strip())
+    if not path.is_file():
+        return None
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(path) as source:
+            image = ImageOps.exif_transpose(source)
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            return None
+        ratio = float(width) / float(height)
+        ratios = {"16:9": 16 / 9, "9:16": 9 / 16, "1:1": 1.0}
+        choices = _video_aspect_choices(model)
+        return min(choices, key=lambda item: abs(ratio - ratios[item]))
+    except Exception:
+        return None
+
+
+def _resolve_video_aspect(index, image_path, cfg, log_fn=None):
+    requested = str(cfg.get("aspect").get() or "").strip()
+    if requested != VIDEO_AUTO_ASPECT:
+        return requested or "16:9"
+    model = str(cfg.get("model").get() or "").strip()
+    detected = _detect_video_aspect(image_path, model) or "16:9"
+    if callable(log_fn):
+        name = Path(str(image_path)).name if image_path else "ไม่มีรูป"
+        log_fn(f"ขนาดอัตโนมัติตามรูป: {detected} ({name})")
+    return detected
+
+
+def _set_video_aspect_auto_for_model(index):
+    """Changing the model starts a fresh aspect decision for the new input."""
+    try:
+        cfg = g["slot_cfg_vars"][int(index)]
+        aspect_var = cfg.get("aspect")
+        if not hasattr(aspect_var, "get") or not hasattr(aspect_var, "set"):
+            return
+        if str(aspect_var.get() or "").strip() == VIDEO_AUTO_ASPECT:
+            return
+        aspect_var.set(VIDEO_AUTO_ASPECT)
+        save_fn = g.get("save_slot_configs")
+        if callable(save_fn):
+            save_fn()
+        logger = g.get("append_log")
+        if callable(logger):
+            logger(int(index), "เปลี่ยนโมเดลแล้ว: ใช้ขนาดอัตโนมัติตามรูป (เลือกขนาดเองได้ที่ Aspect)")
+        _refresh_actual_slot_cfg_label(int(index))
+    except Exception:
+        pass
+
+
+_VIDEO_CAMERA_POLICY_MARKER = "[SnapGen Camera Policy]"
+_VIDEO_CAMERA_POLICIES = {
+    "กล้องนิ่ง ห้ามขยับ": (
+        "LOCKED-OFF CAMERA — highest priority camera instruction. Keep the camera completely fixed "
+        "with fixed framing for the entire clip. No zoom, no push-in, no pull-out, no dolly, no pan, "
+        "no tilt, no orbit, no handheld shake, and no camera movement of any kind. Ignore all earlier "
+        "camera movement instructions."
+    ),
+    "เลื่อนเข้า": "Use one slow, smooth push-in toward the subject. No other camera movement.",
+    "เลื่อนออก": "Use one slow, smooth pull-out away from the subject. No other camera movement.",
+    "เลื่อนซ้าย": "Use one slow, smooth camera move to the left. No zoom or other camera movement.",
+    "เลื่อนขวา": "Use one slow, smooth camera move to the right. No zoom or other camera movement.",
+    "เงยขึ้น": "Use one slow, smooth upward tilt. No zoom or other camera movement.",
+    "ก้มลง": "Use one slow, smooth downward tilt. No zoom or other camera movement.",
+    "ติดตามตัวละคร": "Use a smooth camera move that follows the subject. Do not add a push-in or zoom.",
+    "กล้องมือถือ": "Use subtle handheld camera motion. Do not add a push-in or zoom unless explicitly requested.",
+    "กล้องสั่นแรง": "Use deliberately strong handheld shake. Do not add a push-in or zoom unless explicitly requested.",
+}
+
+
+def _video_camera_policy(prompt, cfg):
+    text = str(prompt or "").strip()
+    text = re.sub(
+        r"\s*\[SnapGen Camera Policy\].*$",
+        "",
+        text,
+        flags=re.I | re.S,
+    ).strip()
+    try:
+        camera_var = cfg.get("camera_movement") if isinstance(cfg, dict) else None
+        camera = str(camera_var.get() if hasattr(camera_var, "get") else camera_var or "อัตโนมัติ").strip()
+    except Exception:
+        camera = "อัตโนมัติ"
+    policy = _VIDEO_CAMERA_POLICIES.get(camera)
+    if not policy:
+        return text
+    return f"{text}\n\n{_VIDEO_CAMERA_POLICY_MARKER}\n{policy}".strip()
+
+
+_original_prompt_with_camera = g.get("prompt_with_camera")
+if callable(_original_prompt_with_camera) and not getattr(_original_prompt_with_camera, "_snapgen_camera_policy_wrapper", False):
+    def _prompt_with_camera_policy(prompt, cfg):
+        # The generate path applies this once before submission. Returning a
+        # marked prompt unchanged prevents the recovered core from appending
+        # its old default push-in after a user's locked-camera choice.
+        if _VIDEO_CAMERA_POLICY_MARKER.casefold() in str(prompt or "").casefold():
+            return str(prompt or "").strip()
+        return _video_camera_policy(_original_prompt_with_camera(prompt, cfg), cfg)
+
+    _prompt_with_camera_policy._snapgen_camera_policy_wrapper = True
+    g["prompt_with_camera"] = _prompt_with_camera_policy
+
+def _rewrite_video_aspect_form(command, aspect):
+    if str(aspect).strip() != "9:16":
+        return command
+    return [
+        "aspect_ratio=9:16" if part == "aspect_ratio=16:9" else part
+        for part in command
+    ]
+
+
+_video_submit_context = threading.local()
+_original_video_run_json = g.get("run_json")
+if callable(_original_video_run_json) and not getattr(_original_video_run_json, "_snapgen_vertical_aspect_wrapper", False):
+    def _run_json_with_vertical_aspect(command, *args, **kwargs):
+        return _original_video_run_json(
+            _rewrite_video_aspect_form(
+                command,
+                getattr(_video_submit_context, "aspect", ""),
+            ),
+            *args,
+            **kwargs,
+        )
+
+    _run_json_with_vertical_aspect._snapgen_vertical_aspect_wrapper = True
+    g["run_json"] = _run_json_with_vertical_aspect
+
+
+def _ffmpeg_veo_watermark_region(width, height):
+    scale = max(0.5, min(int(width), int(height)) / 1080)
+    logo_width = max(24, round(50 * scale))
+    logo_height = max(16, round(30 * scale))
+    right = max(8, round(15 * scale))
+    bottom = max(8, round(15 * scale))
+    return (
+        int(width) - logo_width - right,
+        int(height) - logo_height - bottom,
+        logo_width,
+        logo_height,
+    )
+
+
+_original_remove_veo_watermark = g.get("remove_veo_watermark")
+if callable(_original_remove_veo_watermark):
+    def _remove_veo_watermark_with_ffmpeg_fallback(path):
+        gemini_tool = BASE / "tools" / "GeminiWatermarkTool-Video.exe"
+        if gemini_tool.is_file():
+            return _original_remove_veo_watermark(path)
+
+        source = Path(path)
+        ffmpeg = BASE / "tools" / "ffmpeg" / "ffmpeg.exe"
+        if not source.is_file() or not ffmpeg.is_file():
+            raise RuntimeError("ไม่พบไฟล์วิดีโอต้นฉบับหรือ FFmpeg สำหรับลบลายน้ำ")
+
+        probe = subprocess.run(
+            [str(ffmpeg), "-hide_banner", "-i", str(source)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        video_line = next(
+            (line for line in (probe.stderr + "\n" + probe.stdout).splitlines() if "Video:" in line),
+            "",
+        )
+        size = re.search(r"(\d{2,5})x(\d{2,5})", video_line)
+        if not size:
+            raise RuntimeError("อ่านความละเอียดวิดีโอเพื่อลบลายน้ำไม่ได้")
+        x, y, width, height = _ffmpeg_veo_watermark_region(
+            int(size.group(1)),
+            int(size.group(2)),
+        )
+        output = source.with_name(source.stem + "_clean.mp4")
+        result = subprocess.run(
+            [
+                str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+                "-i", str(source),
+                "-vf", f"delogo=x={x}:y={y}:w={width}:h={height}:show=0",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-c:a", "copy", "-movflags", "+faststart", str(output),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode or not output.is_file() or output.stat().st_size <= 0:
+            output.unlink(missing_ok=True)
+            raise RuntimeError((result.stderr or result.stdout or "FFmpeg ลบลายน้ำไม่สำเร็จ")[-1000:])
+        return str(output)
+
+    g["remove_veo_watermark"] = _remove_veo_watermark_with_ffmpeg_fallback
+
 
 def _normalize_video_model(model):
     raw = str(model or "").strip()
@@ -2488,6 +2777,37 @@ def _save_actual_video_credits():
 
 _load_actual_video_credits()
 
+
+def _initialize_video_auto_aspect_defaults():
+    """Make the old default ratio auto once while preserving later manual picks."""
+    initialized = set()
+    try:
+        data = json.loads(VIDEO_AUTO_ASPECT_STATE_FILE.read_text(encoding="utf-8"))
+        initialized = {int(value) for value in data.get("slots", [])}
+    except Exception:
+        pass
+    changed = False
+    for index, cfg in enumerate(g.get("slot_cfg_vars") or []):
+        if index in initialized or not isinstance(cfg, dict):
+            continue
+        aspect_var = cfg.get("aspect")
+        if hasattr(aspect_var, "get") and str(aspect_var.get() or "").strip() in ("", "16:9", "landscape", "horizontal"):
+            aspect_var.set(VIDEO_AUTO_ASPECT)
+            changed = True
+        initialized.add(index)
+    try:
+        VIDEO_AUTO_ASPECT_STATE_FILE.write_text(
+            json.dumps({"version": 1, "slots": sorted(initialized)}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if changed and callable(g.get("save_slot_configs")):
+            g["save_slot_configs"]()
+    except Exception:
+        pass
+
+
+_initialize_video_auto_aspect_defaults()
+
 _orig_slot_credit = g.get("slot_credit")
 def _slot_index_for_cfg(cfg):
     try:
@@ -2526,10 +2846,24 @@ def _actual_slot_cfg_text(i):
     if str(model) == MINIMAX_H3_LOCAL_MODEL:
         return f"{MINIMAX_H3_LOCAL_LABEL} | Local ฟรี | 608x352"
     if str(model) == LTX23_LOCAL_MODEL:
-        return f"{LTX23_LOCAL_LABEL} | Local ฟรี | 1280x720 | 8 steps"
+        return f"{LTX23_LOCAL_LABEL} | Local ฟรี | {_ltx23_resolution(cfg)} | 8 steps"
+    if str(model) == LTX25_MAESTRO_MODEL:
+        return f"{LTX25_MAESTRO_LABEL} | Maestro Local ฟรี | {_ltx25_resolution(cfg)} | 8 steps"
+    if str(model) == LTX23_CLOUD_MODEL:
+        return f"{LTX23_CLOUD_LABEL} | ComfyUI Local | ดาวน์โหลดและเจนจริง"
     label = "เครดิตจริง"
+    aspect = str(cfg["aspect"].get() or "").strip()
+    aspect_text = aspect
+    if aspect == VIDEO_AUTO_ASPECT:
+        image_path = ""
+        try:
+            image_path = g.get("slot_images", [])[i].get()
+        except Exception:
+            pass
+        detected = _detect_video_aspect(image_path, model)
+        aspect_text = f"{VIDEO_AUTO_ASPECT_LABEL} → {detected}" if detected else VIDEO_AUTO_ASPECT_LABEL
     return (
-        f"{model} | {cfg['resolution'].get()} | {cfg['aspect'].get()}"
+        f"{model} | {cfg['resolution'].get()} | {aspect_text}"
         f"{mode_text} | {label}: {_actual_slot_credit(cfg)}"
     )
 
@@ -2561,7 +2895,7 @@ def _remember_actual_video_credit(i, sig, actual):
         _refresh_actual_slot_cfg_label(i)
 
 def _record_actual_video_credit_sample(i, sig, actual):
-    """Confirm actual credit only when the latest three measurements agree."""
+    """Show the latest measured deduction and confirm it after three matches."""
     number = _credit_number(actual)
     if number is None or number <= 0:
         return "invalid", []
@@ -2570,7 +2904,10 @@ def _record_actual_video_credit_sample(i, sig, actual):
     samples.append(number)
     samples = samples[-3:]
     _actual_video_credit_samples[sig] = samples
-    _save_actual_video_credits()
+    # A single completed job is enough to show the user the measured value.
+    # Keep the three-sample check as a confidence signal, but do not hide the
+    # first real deduction behind it.
+    _remember_actual_video_credit(i, sig, number)
     if len(samples) < 3:
         return "pending", samples
     if samples[0] == samples[1] == samples[2]:
@@ -2626,15 +2963,178 @@ def _fetch_credit_after_deduction(before, log_fn=None, attempts=12, delay=5):
 
 MINIMAX_H3_LOCAL_MODEL = "minimax-h3-local"
 MINIMAX_H3_LOCAL_LABEL = "MiniMax H3 Local"
-MINIMAX_CLOUD_MODEL = "minimax-cloud"
-MINIMAX_CLOUD_LABEL = "MiniMax Cloud"
-MINIMAX_CLOUD_CONFIG = BASE / "minimax_cloud.json"
-CLOUD_ACCOUNTS_FILE = BASE / "cloud_accounts.json"
+GROK_LOWER_MODEL = "grok-lower"
+GROK_LOWER_LABEL = "Grok Lower — เสียเครดิต 50%"
 LTX23_LOCAL_MODEL = "ltx-2.3-local"
 LTX23_LOCAL_LABEL = "LTX-2.3 Distilled 1.1 22B Local"
+LTX25_MAESTRO_MODEL = "ltx-2.5-maestro"
+LTX25_MAESTRO_LABEL = "LTX-2.5 Distilled + Fast VAE"
+LTX23_CLOUD_MODEL = "ltx-2.5-cloud"
+LTX23_CLOUD_LABEL = "LTX-2.5 Fast HQ — เจนจริง ไม่เช่า Vast"
+for _local_video_model in (
+    LTX23_LOCAL_MODEL,
+    LTX25_MAESTRO_MODEL,
+):
+    if _local_video_model not in ALLOWED_VIDEO_MODELS:
+        ALLOWED_VIDEO_MODELS.add(_local_video_model)
 MINIMAX_H3_BASE_URL = "http://127.0.0.1:7861"
-MINIMAX_H3_APP = Path(r"D:\Maestro\app")
+from snapgen_maestro_runtime import (
+    ensure_media_tools as _ensure_maestro_media_tools,
+    ensure_runtime as _ensure_maestro_runtime,
+    log_event as _maestro_log_event,
+    resolve_app as _resolve_maestro_app,
+    runtime_environment as _maestro_runtime_environment,
+    runtime_python as _maestro_runtime_python,
+)
+
+MINIMAX_H3_APP = _resolve_maestro_app()
 MINIMAX_H3_OUTPUTS = MINIMAX_H3_APP / "outputs"
+
+# Patch the recovered core's actual duration source of truth. Its
+# refresh_slot_duration_menu() deletes every menu entry and rebuilds from
+# duration_values_for_model(), which is why post-build widget edits vanished.
+_core_duration_values_for_model = g.get("duration_values_for_model")
+if callable(_core_duration_values_for_model):
+    def duration_values_for_model(model):
+        if str(model or "").strip() == VELA_VIDEO_MODEL:
+            return [VELA_VIDEO_DURATION]
+        if str(model or "").strip() == GROK_LOWER_MODEL:
+            return list(GROK_LOWER_DURATIONS)
+        values = list(_core_duration_values_for_model(model) or [])
+        if str(model or "").strip() in (
+            LTX23_LOCAL_MODEL,
+            LTX25_MAESTRO_MODEL,
+            LTX23_CLOUD_MODEL,
+        ) and "15" not in [str(v) for v in values]:
+            values.append("15")
+        return values
+
+    g["duration_values_for_model"] = duration_values_for_model
+    try:
+        for _duration_slot in range(len(g.get("slot_cfg_vars") or [])):
+            g["refresh_slot_duration_menu"](_duration_slot)
+            _duration_cfg = g["slot_cfg_vars"][_duration_slot]
+            if (
+                str(_duration_cfg.get("model").get() or "").strip() == GROK_LOWER_MODEL
+                and str(_duration_cfg.get("duration").get() or "").strip() not in GROK_LOWER_DURATIONS
+            ):
+                _duration_cfg["duration"].set(GROK_LOWER_DURATIONS[0])
+    except Exception as _duration_patch_error:
+        print(f"[SnapGen] LTX duration menu refresh failed: {_duration_patch_error}", flush=True)
+
+
+# The recovered poller only reads generated_video[].video_url. Vela returns
+# media_url/media_files in its history response, so keep its existing UUID and
+# download flow but use a Vela-specific history reader.
+_original_poll_and_download = g.get("poll_and_download")
+if callable(_original_poll_and_download) and not getattr(_original_poll_and_download, "_snapgen_vela_wrapper", False):
+    def _poll_vela_video(i, uuid, model):
+        if str(model or "").strip() != VELA_VIDEO_MODEL:
+            return _original_poll_and_download(i, uuid, model)
+
+        last_error = None
+        for attempt in range(240):  # 20 minutes; never submit the UUID again.
+            try:
+                history = g["run_json"]([
+                    "curl", "-s", "-X", "GET",
+                    "https://api.snapgen.ai/uapi/v1/history/" + str(uuid),
+                    "-H", "x-api-key: " + g["api_key_var"].get().strip(),
+                ], timeout=60)
+                last_error = None
+            except Exception as exc:
+                last_error = exc
+                text = str(exc)
+                if "401" in text or "403" in text or "API_KEY" in text.upper():
+                    raise
+                if attempt % 12 == 0:
+                    g["append_log"](i, f"เช็คงาน Vela ไม่สำเร็จชั่วคราว: {text[:300]}")
+                time.sleep(5)
+                continue
+
+            if not isinstance(history, dict):
+                last_error = RuntimeError("Vela history ไม่ใช่ JSON object")
+            else:
+                detail = history.get("detail")
+                error_code = history.get("error_code")
+                error_message = history.get("error_message")
+                if isinstance(detail, dict):
+                    error_code = error_code or detail.get("error_code")
+                    error_message = error_message or detail.get("error_message")
+                if error_code or error_message:
+                    raise RuntimeError(str(error_message or error_code))
+
+                url = _find_vela_video_url(history)
+                if url:
+                    root.after(0, lambda slot=i: g["set_slot_state"](slot, "loading", "Downloading Vela..."))
+                    path = g["download_video"](url, str(uuid))
+                    root.after(0, lambda slot=i, result=path: g["append_log"](slot, "ดาวน์โหลด Vela แล้ว: " + str(result)))
+                    return path
+
+                status = str(history.get("status") or "").strip().lower()
+                if status in {"3", "failed", "error", "cancelled", "canceled"}:
+                    raise RuntimeError(str(history.get("status_desc") or "Vela สร้างวิดีโอไม่สำเร็จ"))
+                pct = history.get("status_percentage") or 0
+                desc = history.get("status_desc") or history.get("status") or "กำลังประมวลผล Vela"
+                root.after(0, lambda slot=i, value=pct, text=desc: g["set_slot_state"](slot, "loading", f"Vela {value}%"))
+
+            time.sleep(5)
+
+        if last_error:
+            raise RuntimeError(f"เช็คงาน Vela ไม่สำเร็จ: {last_error}")
+        raise RuntimeError(f"Vela ยังไม่คืนไฟล์ภายใน 20 นาที (UUID: {uuid}) — งานเดิมไม่ถูกส่งซ้ำ")
+
+    _poll_vela_video._snapgen_vela_wrapper = True
+    g["poll_and_download"] = _poll_vela_video
+
+
+_original_generate_one = g.get("generate_one")
+if callable(_original_generate_one) and not getattr(_original_generate_one, "_snapgen_grok_lower_wrapper", False):
+    def _generate_one_with_grok_lower(i, img, prompt):
+        try:
+            cfg = g["slot_cfg_vars"][i]
+            model = str(cfg["model"].get() or "").strip()
+        except Exception:
+            cfg = None
+            model = ""
+        if model != GROK_LOWER_MODEL or cfg is None:
+            return _original_generate_one(i, img, prompt)
+        prompt_builder = g.get("prompt_with_camera")
+        if callable(prompt_builder):
+            prompt = prompt_builder(prompt, cfg)
+        values = {
+            key: str(cfg.get(key).get() or "").strip()
+            for key in ("resolution", "duration", "aspect", "mode")
+            if hasattr(cfg.get(key), "get")
+        }
+        duration = values.get("duration", GROK_LOWER_DURATIONS[0])
+        if duration not in GROK_LOWER_DURATIONS:
+            duration = GROK_LOWER_DURATIONS[0]
+        aspect = {
+            "16:9": "landscape",
+            "9:16": "portrait",
+            "1:1": "square",
+        }.get(values.get("aspect"), values.get("aspect", "landscape"))
+        g["append_log"](
+            i,
+            "Grok Lower params: "
+            + values.get("resolution", "480p")
+            + ", "
+            + duration
+            + "s, "
+            + aspect,
+        )
+        return _request_grok_lower(
+            g["api_key_var"].get(),
+            prompt,
+            img,
+            values.get("resolution", "480p"),
+            duration,
+            aspect,
+            values.get("mode", "custom"),
+        )
+
+    _generate_one_with_grok_lower._snapgen_grok_lower_wrapper = True
+    g["generate_one"] = _generate_one_with_grok_lower
 
 
 def _minimax_h3_request(method, path, **kwargs):
@@ -2650,26 +3150,58 @@ def _minimax_h3_request(method, path, **kwargs):
     return response.json() if response.content else {}
 
 
+def _sanitize_maestro_log_tail(raw_tail):
+    """Return a bounded startup diagnostic safe for UI and GitHub reporting."""
+    safe_tail = re.sub(
+        r"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s,'\"]+",
+        r"\1<redacted>",
+        str(raw_tail or ""),
+    )
+    safe_tail = re.sub(
+        r"(?i)\b(api[_-]?key|token|cookie|secret|password)\b\s*[:=]\s*[^\s,;}]+",
+        r"\1=<redacted>",
+        safe_tail,
+    )
+    safe_tail = re.sub(r"(?i)C:\\Users\\[^\\\s]+", r"%USERPROFILE%", safe_tail)
+    safe_tail = re.sub(r"(?i)\b[A-Z]:\\[^\r\n\"']+", "<local-path>", safe_tail)
+    safe_lines = [line.strip() for line in safe_tail.splitlines() if line.strip()]
+    return "\n".join(safe_lines[-40:])[-12000:]
+
+
 def _ensure_minimax_h3_backend(log_fn=None):
+    global MINIMAX_H3_APP, MINIMAX_H3_OUTPUTS
+
+    # Resolve the complete pair before any GPU work; Maestro needs ffprobe at
+    # final mux time as well as ffmpeg.
+    media_tools_dir = _ensure_maestro_media_tools(log_fn)
     try:
         _minimax_h3_request("GET", "/api/v1/system-stats", timeout=4)
         return
     except Exception:
         pass
-    py = MINIMAX_H3_APP / "env" / "Scripts" / "python.exe"
+    MINIMAX_H3_APP = _ensure_maestro_runtime(log_fn)
+    MINIMAX_H3_OUTPUTS = MINIMAX_H3_APP / "outputs"
+    py = _maestro_runtime_python(MINIMAX_H3_APP)
     launch = MINIMAX_H3_APP / "launch.py"
-    if not py.is_file() or not launch.is_file():
-        raise RuntimeError("ไม่พบ Maestro ที่ D:\\Maestro\\app")
+    if not launch.is_file():
+        raise RuntimeError(f"ไม่พบ Maestro launch.py ที่ {MINIMAX_H3_APP}")
+    if py is None:
+        raise RuntimeError(f"ไม่พบ Python runtime ของ Maestro ที่ {MINIMAX_H3_APP}")
     env = os.environ.copy()
+    env.update(_maestro_runtime_environment())
     env["SERVER_PORT"] = "7861"
     env["PYTHONUNBUFFERED"] = "1"
     env["GIT_PYTHON_REFRESH"] = "quiet"
     env["GIT_PYTHON_GIT_EXECUTABLE"] = r"C:\Program Files\Git\cmd\git.exe"
-    ffmpeg_dir = r"C:\Program Files\Topaz Labs LLC\Topaz Video AI"
+    ffmpeg_dir = str(media_tools_dir)
     env["SNAPGEN_FFMPEG_DIR"] = ffmpeg_dir
-    env["FFMPEG_BINARY"] = os.path.join(ffmpeg_dir, "ffmpeg.exe")
-    env["PATH"] = ffmpeg_dir + os.pathsep + r"C:\Program Files\Git\cmd;C:\Program Files\nodejs;" + env.get("PATH", "")
-    log_path = Path(r"D:\Maestro\snapgen_h3_backend.log")
+    env["FFMPEG_BINARY"] = str(media_tools_dir / "ffmpeg.exe")
+    env["PATH"] = ffmpeg_dir + os.pathsep + env.get("PATH", "")
+    log_path = MINIMAX_H3_APP.parent / "snapgen_backend.log"
+    try:
+        log_start = log_path.stat().st_size
+    except OSError:
+        log_start = 0
     log_stream = open(log_path, "a", encoding="utf-8", errors="replace")
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     subprocess.Popen(
@@ -2678,6 +3210,7 @@ def _ensure_minimax_h3_backend(log_fn=None):
     )
     if callable(log_fn):
         log_fn("กำลังเปิด Maestro Local...")
+    _maestro_log_event(f"Starting Maestro backend: {MINIMAX_H3_APP}")
     for _ in range(90):
         time.sleep(2)
         try:
@@ -2685,7 +3218,30 @@ def _ensure_minimax_h3_backend(log_fn=None):
             return
         except Exception:
             continue
-    raise RuntimeError("เปิด Maestro Local ไม่สำเร็จ ดู log ที่ D:\\Maestro\\snapgen_h3_backend.log")
+    try:
+        with log_path.open("rb") as stream:
+            stream.seek(log_start)
+            raw_tail = stream.read()[-16000:].decode("utf-8", errors="replace")
+    except OSError:
+        raw_tail = ""
+    # Include only output written by this startup attempt, then redact it before
+    # the UI and automatic GitHub error reporter receive the exception.
+    diagnostic = _sanitize_maestro_log_tail(raw_tail)
+    _maestro_log_event(
+        f"FAILED to start Maestro backend; process log: {log_path}; "
+        f"detail: {diagnostic[-4000:]}"
+    )
+    if diagnostic:
+        raise RuntimeError(
+            "เปิด Maestro Local ไม่สำเร็จ\n\n"
+            "สาเหตุจาก Maestro:\n"
+            f"{diagnostic}\n\n"
+            f"Log เต็ม: {log_path}"
+        )
+    raise RuntimeError(
+        "เปิด Maestro Local ไม่สำเร็จ และ Maestro ไม่เขียนรายละเอียดลง Log\n"
+        f"Log: {log_path}"
+    )
 
 
 def _configure_maestro_vram(target_coefficient, model_label, log_fn=None):
@@ -2792,881 +3348,251 @@ def _ltx23_frames(duration_value):
     return max(50, min(500, int(round(seconds * 25))))
 
 
-def _cloud_accounts_default_profile():
-    return {
-        "name": "Vast MiniMax",
-        "provider": "vast",
-        "instance_id": "",
-        "ssh_host": "",
-        "ssh_port": 0,
-        "ssh_user": "root",
-        "ssh_key": r"C:\Users\Apinan\snapgen_vast_ed25519",
-        "remote_comfy_port": 18188,
-        "local_tunnel_port": 18189,
-        "width": 1280,
-        "height": 720,
-        "steps": 4,
-        "lora_strength": 1.0,
-        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-        "video_vae_name": "minimax_h3_video_vae_fp16.safetensors",
-        "audio_vae_name": "minimax_h3_audio_vae_fp32.safetensors",
-        "lora_name": "minimax_h3_turbo_4step_ckpt500.safetensors",
-        "auto_rent": True,
-        "gpu_name": "RTX 3090",
-        "max_dph": 0.180,
-        "min_reliability": 0.97,
-        "auto_destroy": True,
-        "template_hash_id": "12f3135c9e5b9eace28785917f0eec93",
-        "image": "vastai/comfy:v0.30.0-cuda-13.2-py312",
-        "disk": 80,
-        "instance_label": "SnapGen MiniMax Auto"
-    }
+def _ltx23_resolution(cfg):
+    aspect_var = cfg.get("aspect") if isinstance(cfg, dict) else None
+    aspect = str(aspect_var.get() if hasattr(aspect_var, "get") else "16:9").strip()
+    return "720x1280" if aspect == "9:16" else "1280x720"
 
 
-def _load_cloud_accounts():
-    payload = {"version": 1, "active": "", "profiles": []}
+def _ltx25_frames(duration_value):
+    raw = str(duration_value or "5").lower().replace("seconds", "").replace("second", "").replace("sec", "").strip()
     try:
-        if CLOUD_ACCOUNTS_FILE.is_file():
-            raw = json.loads(CLOUD_ACCOUNTS_FILE.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                payload.update(raw)
+        seconds = float(re.search(r"[0-9]+(?:\.[0-9]+)?", raw).group(0))
     except Exception:
-        pass
-    profiles = payload.get("profiles")
-    if not isinstance(profiles, list):
-        profiles = []
-    cleaned = []
-    for item in profiles:
-        if not isinstance(item, dict):
-            continue
-        row = _cloud_accounts_default_profile()
-        row.update(item)
-        row["name"] = str(row.get("name") or "Vast MiniMax").strip()
-        row["provider"] = str(row.get("provider") or "vast").strip().lower()
-        cleaned.append(row)
-    payload["profiles"] = cleaned
-    active = str(payload.get("active") or "").strip()
-    if active and not any(str(x.get("name") or "") == active for x in cleaned):
-        payload["active"] = ""
-    return payload
+        seconds = 5.0
+    seconds = max(2.0, min(20.0, seconds))
+    return max(49, min(481, 1 + 8 * round((seconds * 24 - 1) / 8)))
 
 
-def _save_cloud_accounts(payload):
-    CLOUD_ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = CLOUD_ACCOUNTS_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(CLOUD_ACCOUNTS_FILE)
+def _ltx25_resolution(cfg):
+    aspect_var = cfg.get("aspect") if isinstance(cfg, dict) else None
+    aspect = str(aspect_var.get() if hasattr(aspect_var, "get") else "16:9").strip()
+    return "704x1280" if aspect == "9:16" else "1280x704"
 
 
-def _migrate_minimax_cloud_to_accounts():
-    data = _load_cloud_accounts()
-    if data.get("profiles"):
-        return data
-    legacy = None
-    try:
-        if MINIMAX_CLOUD_CONFIG.is_file():
-            obj = json.loads(MINIMAX_CLOUD_CONFIG.read_text(encoding="utf-8"))
-            if isinstance(obj, dict):
-                legacy = obj
-    except Exception:
-        legacy = None
-    if legacy:
-        profile = _cloud_accounts_default_profile()
-        profile.update(legacy)
-        profile["name"] = str(legacy.get("name") or "Vast MiniMax").strip()
-        data["profiles"] = [profile]
-        data["active"] = profile["name"]
-        _save_cloud_accounts(data)
-    return data
+LTX25_MAESTRO_MODEL_TYPE = "ltx2_25"
+_ltx25_maestro_install_lock = threading.Lock()
+_ltx25_download_size_cache = {}
 
 
-def _active_cloud_profile(provider="vast"):
-    data = _migrate_minimax_cloud_to_accounts()
-    wanted = str(provider or "").lower()
-    active = str(data.get("active") or "")
-    profiles = [p for p in data.get("profiles", []) if str(p.get("provider") or "").lower() == wanted]
-    for p in profiles:
-        if str(p.get("name") or "") == active:
-            return dict(p)
-    return dict(profiles[0]) if profiles else None
+def _ltx25_maestro_downloaded():
+    """Ask Maestro for the real LTX-2.5/Fast-VAE install state."""
+    info = _minimax_h3_request(
+        "GET", f"/api/v1/models/{LTX25_MAESTRO_MODEL_TYPE}/debug", timeout=30
+    )
+    return bool(info.get("is_downloaded"))
 
 
-def _parse_vast_ssh_text(text):
-    raw = str(text or "").strip()
-    out = {}
-    m = re.search(r"ssh(?:\.exe)?(?:\s+[^\r\n]*?)?\s+(?:-p\s+(\d+)\s+)?([\w.-]+)@([\w.:-]+)", raw, re.I)
-    if not m:
-        # common order: ssh -p PORT root@HOST
-        port = re.search(r"(?:^|\s)-p\s+(\d+)", raw, re.I)
-        target = re.search(r"([A-Za-z0-9._-]+)@([A-Za-z0-9.:-]+)", raw)
-        if target:
-            out["ssh_user"] = target.group(1)
-            out["ssh_host"] = target.group(2)
-            if port:
-                out["ssh_port"] = int(port.group(1))
-    else:
-        if m.group(1): out["ssh_port"] = int(m.group(1))
-        out["ssh_user"] = m.group(2)
-        out["ssh_host"] = m.group(3)
-    iid = re.search(r"(?:instance(?:_id)?|id)\s*[:=#]?\s*(\d{5,})", raw, re.I)
-    if iid:
-        out["instance_id"] = iid.group(1)
-    return out
-
-
-def _open_cloud_accounts_manager(parent=None):
-    from tkinter import filedialog, messagebox
-    host = parent or root
-    try:
-        grabbed = root.grab_current()
-        if grabbed:
-            grabbed.grab_release()
-    except Exception:
-        pass
-    win = tk.Toplevel(root)
-    win.title("Cloud Accounts")
-    win.geometry("820x610")
-    win.transient(root)
-    try: win.grab_set()
-    except Exception: pass
-
-    data = _migrate_minimax_cloud_to_accounts()
-    selected_name = tk.StringVar(value=str(data.get("active") or ""))
-    status_var = tk.StringVar(value="เลือก Vast profile สำหรับ MiniMax Cloud")
-
-    tk.Label(win, text="Cloud Accounts", font=(SNAPGEN_UI_FONT, 14, "bold")).pack(anchor="w", padx=12, pady=(12,4))
-    tk.Label(win, text="เก็บ endpoint ของ Vast แยกเป็นหลาย profile — MiniMax Cloud จะใช้ profile ที่ Active", fg="#555").pack(anchor="w", padx=12)
-
-    body = tk.Frame(win); body.pack(fill="both", expand=True, padx=12, pady=10)
-    left = tk.LabelFrame(body, text="Vast Profiles", width=250); left.pack(side="left", fill="y", padx=(0,10)); left.pack_propagate(False)
-    right = tk.LabelFrame(body, text="Profile"); right.pack(side="left", fill="both", expand=True)
-    lb = tk.Listbox(left, exportselection=False); lb.pack(fill="both", expand=True, padx=6, pady=6)
-
-    vars_ = {k: tk.StringVar() for k in ("name","instance_id","ssh_host","ssh_port","ssh_user","ssh_key","remote_comfy_port","local_tunnel_port","width","height","steps","lora_strength")}
-    rows = [
-        ("ชื่อ Profile","name"),("Instance ID","instance_id"),("SSH Host","ssh_host"),("SSH Port","ssh_port"),
-        ("SSH User","ssh_user"),("SSH Key","ssh_key"),("ComfyUI Port","remote_comfy_port"),("Tunnel Port","local_tunnel_port"),
-        ("Width","width"),("Height","height"),("Steps","steps"),("LoRA Strength","lora_strength"),
+def _ltx25_active_download_progress():
+    payload = _minimax_h3_request("GET", "/api/v1/downloads/active", timeout=30)
+    downloads = payload.get("downloads", []) if isinstance(payload, dict) else []
+    active = [
+        item for item in downloads
+        if isinstance(item, dict)
+        and int(item.get("total_bytes") or 0) > 0
+        and str(item.get("status") or "").lower() not in {"done", "incomplete"}
     ]
-    form = tk.Frame(right); form.pack(fill="x", padx=8, pady=8)
-    key_entry = None
-    for r,(label,key) in enumerate(rows):
-        tk.Label(form,text=label,width=14,anchor="w").grid(row=r,column=0,sticky="w",pady=3)
-        e=tk.Entry(form,textvariable=vars_[key]); e.grid(row=r,column=1,sticky="ew",pady=3)
-        if key=="ssh_key": key_entry=e
-    form.grid_columnconfigure(1,weight=1)
-    def choose_key():
-        f=filedialog.askopenfilename(parent=win,title="เลือก SSH private key",initialdir=str(Path.home()))
-        if f: vars_["ssh_key"].set(f)
-    tk.Button(form,text="เลือก Key",command=choose_key).grid(row=5,column=2,padx=(6,0))
-
-    def profiles(): return data.setdefault("profiles",[])
-    def refresh_list(select=None):
-        lb.delete(0,tk.END)
-        for p in profiles():
-            mark=" ★" if str(p.get("name") or "")==str(data.get("active") or "") else ""
-            lb.insert(tk.END, str(p.get("name") or "Vast")+mark)
-        target=select or data.get("active")
-        for idx,p in enumerate(profiles()):
-            if str(p.get("name") or "")==str(target or ""):
-                lb.selection_set(idx); lb.see(idx); load_index(idx); break
-    def load_index(idx):
-        if idx<0 or idx>=len(profiles()): return
-        p=profiles()[idx]
-        for k,v in vars_.items(): v.set(str(p.get(k,"")))
-        status_var.set("Active: "+str(data.get("active") or "ยังไม่ได้เลือก"))
-    def on_select(_e=None):
-        sel=lb.curselection()
-        if sel: load_index(sel[0])
-    lb.bind('<<ListboxSelect>>',on_select)
-
-    def collect():
-        p=_cloud_accounts_default_profile()
-        for k,v in vars_.items(): p[k]=v.get().strip()
-        for k in ("ssh_port","remote_comfy_port","local_tunnel_port","width","height","steps"):
-            try: p[k]=int(float(p[k] or 0))
-            except Exception: p[k]=0
-        try: p["lora_strength"]=float(p["lora_strength"] or 1.0)
-        except Exception: p["lora_strength"]=1.0
-        p["provider"]="vast"
-        if not p["name"]: p["name"]="Vast MiniMax"
-        return p
-    def save_profile():
-        p=collect(); sel=lb.curselection(); old_name=""
-        if sel:
-            old_name=str(profiles()[sel[0]].get("name") or "")
-            profiles()[sel[0]]=p
-        else:
-            existing=next((i for i,x in enumerate(profiles()) if str(x.get("name") or "")==p["name"]),None)
-            if existing is None: profiles().append(p)
-            else: profiles()[existing]=p
-        if not data.get("active") or str(data.get("active"))==old_name: data["active"]=p["name"]
-        _save_cloud_accounts(data); refresh_list(p["name"]); status_var.set("บันทึกแล้ว: "+p["name"])
-    def new_profile():
-        p=_cloud_accounts_default_profile()
-        for k,v in vars_.items(): v.set(str(p.get(k,"")))
-        lb.selection_clear(0,tk.END); status_var.set("สร้าง profile ใหม่")
-    def delete_profile():
-        sel=lb.curselection()
-        if not sel: return
-        p=profiles()[sel[0]]
-        if not messagebox.askokcancel("Cloud Accounts",f"ลบ profile {p.get('name')} ?",parent=win): return
-        name=str(p.get("name") or ""); profiles().pop(sel[0])
-        if data.get("active")==name: data["active"]=str(profiles()[0].get("name") or "") if profiles() else ""
-        _save_cloud_accounts(data); refresh_list(); status_var.set("ลบแล้ว: "+name)
-    def make_active():
-        p=collect()
-        if not p.get("ssh_host") or not p.get("ssh_port"):
-            status_var.set("ต้องมี SSH Host/Port ก่อน") ; return
-        save_profile(); data["active"]=p["name"]; _save_cloud_accounts(data); refresh_list(p["name"]); status_var.set("ใช้กับ MiniMax Cloud แล้ว: "+p["name"])
-    def capture_clipboard():
-        try: raw=root.clipboard_get()
-        except Exception: raw=""
-        parsed=_parse_vast_ssh_text(raw)
-        if not parsed:
-            status_var.set("Clipboard ไม่มี SSH command ของ Vast เช่น ssh -p 12345 root@1.2.3.4"); return
-        for k,val in parsed.items():
-            if k in vars_: vars_[k].set(str(val))
-        if not vars_["name"].get().strip() and parsed.get("ssh_host"): vars_["name"].set("Vast "+str(parsed["ssh_host"]))
-        status_var.set("จับ SSH endpoint จาก Clipboard แล้ว — กดบันทึก/ใช้ Profile")
-    def test_ssh():
-        p=collect(); status_var.set("กำลังทดสอบ SSH...")
-        def worker():
-            try:
-                r=_minimax_cloud_ssh(p,"echo SNAPGEN_CLOUD_OK && nvidia-smi --query-gpu=name,memory.total --format=csv,noheader",timeout=25,check=True)
-                msg=(r.stdout or "SNAPGEN_CLOUD_OK").strip()
-                root.after(0,lambda: status_var.set("SSH พร้อม: "+msg.replace("\n"," | ")[:180]))
-            except Exception as exc:
-                root.after(0,lambda e=str(exc): status_var.set("SSH ไม่พร้อม: "+e[:180]))
-        threading.Thread(target=worker,daemon=True).start()
-
-    buttons=tk.Frame(right); buttons.pack(fill="x",padx=8,pady=(0,8))
-    tk.Button(buttons,text="+ ใหม่",command=new_profile).pack(side="left")
-    tk.Button(buttons,text="📋 จับ SSH จาก Clipboard",command=capture_clipboard,bg="#0EA5E9",fg="white").pack(side="left",padx=5)
-    tk.Button(buttons,text="บันทึก",command=save_profile,bg="#2563EB",fg="white").pack(side="left",padx=5)
-    tk.Button(buttons,text="★ ใช้ Profile นี้",command=make_active,bg="#16A34A",fg="white").pack(side="left",padx=5)
-    tk.Button(buttons,text="ทดสอบ SSH",command=test_ssh).pack(side="left",padx=5)
-    tk.Button(buttons,text="ลบ",command=delete_profile,fg="#B91C1C").pack(side="right")
-    tk.Label(win,textvariable=status_var,anchor="w",fg="#475569").pack(fill="x",padx=12,pady=(0,10))
-    refresh_list()
-    return win
-
-
-g["open_cloud_accounts"] = _open_cloud_accounts_manager
-
-
-def _load_minimax_cloud_config():
-    defaults = {
-        "instance_id": "",
-        "ssh_host": "",
-        "ssh_port": 0,
-        "ssh_user": "root",
-        "ssh_key": r"C:\Users\Apinan\snapgen_vast_ed25519",
-        "remote_comfy_port": 18188,
-        "local_tunnel_port": 18189,
-        "width": 1280,
-        "height": 720,
-        "steps": 4,
-        "lora_strength": 1.0,
-        "unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-        "video_vae_name": "minimax_h3_video_vae_fp16.safetensors",
-        "audio_vae_name": "minimax_h3_audio_vae_fp32.safetensors",
-        "lora_name": "minimax_h3_turbo_4step_ckpt500.safetensors",
-        "auto_rent": True,
-        "gpu_name": "RTX 3090",
-        "max_dph": 0.180,
-        "min_reliability": 0.97,
-        "auto_destroy": True,
-        "template_hash_id": "12f3135c9e5b9eace28785917f0eec93",
-        "image": "vastai/comfy:v0.30.0-cuda-13.2-py312",
-        "disk": 80,
-        "instance_label": "SnapGen MiniMax Auto"
-    }
-    try:
-        if MINIMAX_CLOUD_CONFIG.is_file():
-            loaded = json.loads(MINIMAX_CLOUD_CONFIG.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                defaults.update(loaded)
-        active = _active_cloud_profile("vast")
-        if isinstance(active, dict):
-            defaults.update(active)
-    except Exception as exc:
-        raise RuntimeError(f"อ่าน MiniMax Cloud/Cloud Accounts config ไม่สำเร็จ: {exc}") from exc
-    return defaults
-
-
-
-def _snapgen_vast_browser_port(launch=True):
-    """Find or launch the dedicated SnapGen Chrome profile used for Vast auth."""
-    import urllib.request
-    for port in range(9223, 9244):
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=0.2) as response:
-                tabs = json.loads(response.read().decode("utf-8", "replace"))
-            if any(t.get("type") == "page" and "cloud.vast.ai" in str(t.get("url") or "") for t in tabs):
-                return port
-        except Exception:
-            pass
-    if not launch:
+    if not active:
+        return _ltx25_cache_download_progress()
+    downloaded = sum(max(0, int(item.get("downloaded_bytes") or 0)) for item in active)
+    total = sum(max(0, int(item.get("total_bytes") or 0)) for item in active)
+    if total <= 0:
         return None
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google" / "Chrome" / "Application" / "chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "Google" / "Chrome" / "Application" / "chrome.exe",
-    ]
-    chrome = next((x for x in candidates if x.is_file()), None)
-    if not chrome:
-        raise RuntimeError("MiniMax Cloud ไม่พบ Google Chrome สำหรับ SnapGen Browser")
-    local_appdata = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local")))
-    profile_dir = local_appdata / "TidMunStudio" / "SnapGenChromeProfile"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    import socket
-    port = None
-    for candidate in range(9223, 9244):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind(("127.0.0.1", candidate))
-            port = candidate
-            break
-        except OSError:
-            continue
-    if port is None:
-        raise RuntimeError("MiniMax Cloud หา DevTools port ว่างไม่ได้")
-    subprocess.Popen([
-        str(chrome), f"--user-data-dir={profile_dir}", "--profile-directory=Default",
-        f"--remote-debugging-port={port}", "--remote-debugging-address=127.0.0.1",
-        "--remote-allow-origins=*", "--new-window", "https://cloud.vast.ai/instances/",
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
-    deadline = time.time() + 25
-    while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=1) as response:
-                tabs = json.loads(response.read().decode("utf-8", "replace"))
-            if any(t.get("type") == "page" and "cloud.vast.ai" in str(t.get("url") or "") for t in tabs):
-                return port
-        except Exception:
-            pass
-        time.sleep(0.5)
-    raise RuntimeError("MiniMax Cloud เปิด SnapGen Browser ไม่สำเร็จ")
-
-
-def _vast_browser_api(method, path, body=None, timeout=45):
-    """Call Vast same-origin API inside the already logged-in SnapGen Browser."""
-    import urllib.request
-    try:
-        import websocket
-    except Exception as exc:
-        raise RuntimeError(f"MiniMax Cloud ต้องใช้ websocket-client: {exc}") from exc
-    port = _snapgen_vast_browser_port(launch=True)
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=3) as response:
-        tabs = json.loads(response.read().decode("utf-8", "replace"))
-    tab = next((t for t in tabs if t.get("type") == "page" and "cloud.vast.ai" in str(t.get("url") or "")), None)
-    if not tab or not tab.get("webSocketDebuggerUrl"):
-        raise RuntimeError("MiniMax Cloud ไม่พบ Vast tab ใน SnapGen Browser")
-    options = {"method": str(method or "GET").upper(), "credentials": "include"}
-    if body is not None:
-        options["headers"] = {"Content-Type": "application/json"}
-        options["body"] = json.dumps(body, ensure_ascii=False)
-    js = (
-        "fetch(" + json.dumps(str(path)) + "," + json.dumps(options, ensure_ascii=False) + ")"
-        ".then(async r=>({status:r.status,text:await r.text()}))"
-        ".catch(e=>({status:0,text:String(e)}))"
+    current = active[-1]
+    return (
+        max(0, min(100, int(downloaded * 100 / total))),
+        str(current.get("filename") or "ไฟล์โมเดล"),
+        str(current.get("status") or "downloading").lower(),
     )
-    ws = websocket.create_connection(
-        tab["webSocketDebuggerUrl"], timeout=max(5, int(timeout)), origin=f"http://127.0.0.1:{port}"
-    )
-    try:
-        req_id = int(time.time() * 1000) % 2000000000
-        ws.send(json.dumps({
-            "id": req_id, "method": "Runtime.evaluate",
-            "params": {"expression": js, "awaitPromise": True, "returnByValue": True},
-        }))
-        deadline = time.time() + max(5, int(timeout))
-        while time.time() < deadline:
-            msg = json.loads(ws.recv())
-            if msg.get("id") != req_id:
-                continue
-            value = msg.get("result", {}).get("result", {}).get("value") or {}
-            status = int(value.get("status") or 0)
-            raw = str(value.get("text") or "")
-            try:
-                data = json.loads(raw) if raw else {}
-            except Exception:
-                data = {"raw": raw}
-            if status < 200 or status >= 300:
-                detail = data.get("msg") if isinstance(data, dict) else raw
-                raise RuntimeError(f"Vast API {status}: {str(detail or raw)[:700]}")
-            return data
-        raise RuntimeError("Vast API timeout")
-    finally:
-        try: ws.close()
-        except Exception: pass
 
 
-def _minimax_cloud_find_offer(cloud):
-    gpu_name = str(cloud.get("gpu_name") or "RTX 3090").replace("_", " ").strip()
-    max_dph = float(cloud.get("max_dph") or 0.180)
-    min_reliability = float(cloud.get("min_reliability") or 0.0)
-    disk = max(32, int(cloud.get("disk") or 64))
-    query = {
-        "gpu_name": {"in": [gpu_name]}, "num_gpus": {"gte": 1}, "gpu_ram": {"gte": 24000},
-        "verified": {"eq": True}, "rentable": {"eq": True}, "rented": {"eq": False},
-        "type": "ondemand", "limit": 100,
-    }
-    data = _vast_browser_api("POST", "/api/v0/bundles/", query, timeout=45)
-    offers = data.get("offers") or [] if isinstance(data, dict) else []
-    eligible = []
-    for offer in offers:
-        try:
-            dph = float(offer.get("dph_total"))
-            rel = float(offer.get("reliability2") or 0)
-            space = float(offer.get("disk_space") or 0)
-        except Exception:
-            continue
-        if dph <= max_dph and rel >= min_reliability and space >= disk:
-            eligible.append(offer)
-    if not eligible:
-        raise RuntimeError(f"MiniMax Cloud ไม่พบ {gpu_name} ที่ราคาไม่เกิน ${max_dph:.3f}/ชม. ตามเงื่อนไข")
-    eligible.sort(key=lambda x: (float(x.get("dph_total") or 999), -float(x.get("reliability2") or 0)))
-    return eligible[0]
-
-
-def _minimax_cloud_public_key(cloud):
-    key = Path(str(cloud.get("ssh_key") or "").strip())
-    pub = Path(str(key) + ".pub")
-    if pub.is_file():
-        return pub.read_text(encoding="utf-8", errors="replace").strip()
-    ssh_keygen = Path(r"C:\Windows\System32\OpenSSH\ssh-keygen.exe") if os.name == "nt" else Path("ssh-keygen")
-    proc = subprocess.run([str(ssh_keygen), "-y", "-f", str(key)], text=True, capture_output=True, timeout=20)
-    if proc.returncode != 0 or not (proc.stdout or "").strip():
-        raise RuntimeError("MiniMax Cloud สร้าง public SSH key จาก key ที่ตั้งไว้ไม่ได้")
-    return proc.stdout.strip()
-
-
-def _minimax_cloud_rent_instance(cloud, log_fn=None):
-    if not bool(cloud.get("auto_rent", True)):
-        raise RuntimeError("MiniMax Cloud ยังไม่มี SSH endpoint และปิด Auto Rent อยู่")
-    template_hash = str(cloud.get("template_hash_id") or "").strip()
-    image = str(cloud.get("image") or "").strip()
-    if not template_hash and not image:
-        raise RuntimeError(
-            "MiniMax Cloud ยังไม่มี H3 template/image ที่พร้อมใช้งาน — หยุดก่อน RENT เพื่อไม่ให้เสียเครดิตกับเครื่องเปล่า"
+def _ltx25_cache_download_progress():
+    """Read Hugging Face's real partial-file bytes when Maestro's hook is empty."""
+    cache = MINIMAX_H3_APP / "ckpts" / ".cache" / "huggingface" / "download"
+    if not cache.is_dir():
+        return None
+    partials = list(cache.rglob("*.incomplete"))
+    locks = list(cache.rglob("*.lock"))
+    if not partials or not locks:
+        return None
+    partial = max(partials, key=lambda path: path.stat().st_mtime)
+    lock = max(locks, key=lambda path: path.stat().st_mtime)
+    filename = lock.name[:-5]
+    relative = (lock.parent.relative_to(cache) / filename).as_posix()
+    total = _ltx25_download_size_cache.get(relative)
+    if not total:
+        url = (
+            "https://huggingface.co/DeepBeepMeep/LTX-2/resolve/main/"
+            + urllib.parse.quote(relative, safe="/")
         )
-    offer = _minimax_cloud_find_offer(cloud)
-    dph = float(offer.get("dph_total") or 0)
-    if callable(log_fn):
-        log_fn(f"MiniMax Cloud: พบ {offer.get('gpu_name')} ${dph:.3f}/ชม. — เช่าอัตโนมัติ")
-    create = {
-        "disk": max(32, int(cloud.get("disk") or 64)),
-        "label": str(cloud.get("instance_label") or "SnapGen MiniMax Auto"),
-    }
-    if template_hash:
-        create["template_hash_id"] = template_hash
-    else:
-        create.update({"image": image, "runtype": "ssh_direct"})
-        onstart = str(cloud.get("onstart") or "").strip()
-        if onstart: create["onstart"] = onstart
-    result = _vast_browser_api("PUT", f"/api/v0/asks/{int(offer['id'])}/", create, timeout=60)
-    instance_id = str(result.get("new_contract") or "") if isinstance(result, dict) else ""
-    if not instance_id:
-        raise RuntimeError("MiniMax Cloud RENT สำเร็จแต่ Vast ไม่คืน instance id")
-    try:
-        public_key = _minimax_cloud_public_key(cloud)
-        _vast_browser_api("POST", f"/api/v0/instances/{instance_id}/ssh/", {"ssh_key": public_key}, timeout=30)
-    except Exception as exc:
-        if callable(log_fn): log_fn("MiniMax Cloud: แนบ SSH key อัตโนมัติไม่สำเร็จ: " + str(exc)[:180])
-    deadline = time.time() + 600
-    last_status = ""
-    while time.time() < deadline:
-        info = _vast_browser_api("GET", f"/api/v0/instances/{instance_id}/", timeout=30)
-        row = info.get("instances") if isinstance(info, dict) else None
-        if isinstance(row, list): row = row[0] if row else None
-        row = row or {}
-        last_status = str(row.get("actual_status") or row.get("status_msg") or "กำลังเตรียม")
-        host = str(row.get("ssh_host") or "").strip()
-        port = int(row.get("ssh_port") or 0)
-        if str(row.get("actual_status") or "").lower() == "running" and host and port > 0:
-            out = dict(cloud)
-            out.update({"instance_id": instance_id, "ssh_host": host, "ssh_port": port, "ssh_user": "root"})
-            out["_snapgen_auto_instance_id"] = instance_id
-            out["_snapgen_offer_dph"] = dph
-            if callable(log_fn): log_fn(f"MiniMax Cloud: Vast พร้อม SSH | instance {instance_id}")
-            return out
-        if callable(log_fn): log_fn(f"MiniMax Cloud: รอ instance {instance_id} | {last_status}")
-        time.sleep(5)
-    try: _vast_browser_api("DELETE", f"/api/v0/instances/{instance_id}/", timeout=30)
-    except Exception: pass
-    raise RuntimeError(f"MiniMax Cloud instance {instance_id} ไม่พร้อมภายใน 10 นาที: {last_status}")
-
-
-def _minimax_cloud_prepare_instance(cloud, log_fn=None):
-    host = str(cloud.get("ssh_host") or "").strip()
-    port = int(cloud.get("ssh_port") or 0)
-    if host and port > 0:
-        try:
-            probe = _minimax_cloud_ssh(cloud, "echo SNAPGEN_CLOUD_READY", timeout=20, check=False)
-            if probe.returncode == 0 and "SNAPGEN_CLOUD_READY" in (probe.stdout or ""):
-                return cloud
-        except Exception:
-            pass
-    return _minimax_cloud_rent_instance(cloud, log_fn=log_fn)
-
-
-def _minimax_cloud_cleanup_auto_instance(cloud, log_fn=None):
-    instance_id = str(cloud.get("_snapgen_auto_instance_id") or "").strip()
-    if not instance_id or not bool(cloud.get("auto_destroy", True)):
-        return
-    try:
-        if callable(log_fn): log_fn(f"MiniMax Cloud: ปิดค่าใช้จ่าย — destroy instance {instance_id}...")
-        _vast_browser_api("DELETE", f"/api/v0/instances/{instance_id}/", timeout=45)
-        if callable(log_fn): log_fn(f"MiniMax Cloud: destroy instance {instance_id} แล้ว")
-    except Exception as exc:
-        if callable(log_fn): log_fn("MiniMax Cloud: WARNING destroy instance ไม่สำเร็จ: " + str(exc)[:220])
-
-def _minimax_cloud_ssh_base(cloud):
-    ssh_exe = r"C:\Windows\System32\OpenSSH\ssh.exe" if os.name == "nt" else "ssh"
-    key = str(cloud.get("ssh_key") or "").strip()
-    host = str(cloud.get("ssh_host") or "").strip()
-    port = int(cloud.get("ssh_port") or 0)
-    user = str(cloud.get("ssh_user") or "root").strip() or "root"
-    if not host or port <= 0:
-        raise RuntimeError(f"MiniMax Cloud ยังไม่ได้ตั้ง ssh_host/ssh_port ใน {MINIMAX_CLOUD_CONFIG}")
-    if not key or not Path(key).is_file():
-        raise RuntimeError(f"MiniMax Cloud ไม่พบ SSH key: {key or '(ว่าง)'}")
-    return [
-        ssh_exe, "-o", "BatchMode=yes", "-o", "ConnectTimeout=12",
-        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-        "-o", "StrictHostKeyChecking=accept-new", "-i", key,
-        "-p", str(port), f"{user}@{host}",
-    ]
-
-
-def _minimax_cloud_ssh(cloud, command, timeout=120, check=True):
-    proc = subprocess.run(
-        _minimax_cloud_ssh_base(cloud) + [command],
-        text=True, capture_output=True, timeout=timeout,
+        request = urllib.request.Request(
+            url,
+            headers={"Range": "bytes=0-0", "User-Agent": "SnapGen-LTX-progress/1.0"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            content_range = str(response.headers.get("Content-Range") or "")
+            match = re.search(r"/(\d+)$", content_range)
+            if match:
+                total = int(match.group(1))
+            else:
+                total = int(response.headers.get("X-Linked-Size") or 0)
+        if total:
+            _ltx25_download_size_cache[relative] = total
+    downloaded = partial.stat().st_size
+    if not total or downloaded > total:
+        return None
+    return (
+        max(0, min(100, int(downloaded * 100 / total))),
+        filename,
+        "cache",
     )
-    if check and proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "SSH command failed").strip()
-        raise RuntimeError(f"MiniMax Cloud SSH error: {detail[:900]}")
-    return proc
 
 
-def _minimax_cloud_scp_to(cloud, local_path, remote_path):
-    scp_exe = r"C:\Windows\System32\OpenSSH\scp.exe" if os.name == "nt" else "scp"
-    base = _minimax_cloud_ssh_base(cloud)
-    key = base[base.index("-i") + 1]
-    port = int(cloud.get("ssh_port") or 0)
-    user = str(cloud.get("ssh_user") or "root").strip() or "root"
-    host = str(cloud.get("ssh_host") or "").strip()
-    proc = subprocess.run([
-        scp_exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-        "-i", key, "-P", str(port), str(local_path), f"{user}@{host}:{remote_path}"
-    ], text=True, capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"MiniMax Cloud upload error: {(proc.stderr or proc.stdout)[:900]}")
+def _ensure_ltx25_maestro_model(log_fn=None, progress_fn=None):
+    """Install the exact LTX-2.5 Fast-VAE dependency set once, when needed."""
+    ui_log = log_fn if callable(log_fn) else (lambda _message: None)
 
+    def log(message):
+        _maestro_log_event(message)
+        ui_log(message)
 
-def _minimax_cloud_scp_from(cloud, remote_path, local_path):
-    scp_exe = r"C:\Windows\System32\OpenSSH\scp.exe" if os.name == "nt" else "scp"
-    base = _minimax_cloud_ssh_base(cloud)
-    key = base[base.index("-i") + 1]
-    port = int(cloud.get("ssh_port") or 0)
-    user = str(cloud.get("ssh_user") or "root").strip() or "root"
-    host = str(cloud.get("ssh_host") or "").strip()
-    proc = subprocess.run([
-        scp_exe, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-        "-i", key, "-P", str(port), f"{user}@{host}:{remote_path}", str(local_path)
-    ], text=True, capture_output=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"MiniMax Cloud download error: {(proc.stderr or proc.stdout)[:900]}")
+    with _ltx25_maestro_install_lock:
+        _ensure_minimax_h3_backend(log)
+        if _ltx25_maestro_downloaded():
+            log("LTX-2.5 Distilled + Fast VAE พร้อมใช้งานแล้ว")
+            return
 
-
-def _minimax_cloud_wait_ssh(cloud, log_fn=None, seconds=180):
-    deadline = time.time() + max(30, int(seconds))
-    last = ""
-    while time.time() < deadline:
+        log("ไม่พบ LTX-2.5 Distilled + Fast VAE — กำลังดาวน์โหลดอัตโนมัติ...")
         try:
-            proc = _minimax_cloud_ssh(cloud, "echo CLOUD_SSH_OK", timeout=20, check=False)
-            if "CLOUD_SSH_OK" in (proc.stdout or ""):
-                return
-            last = (proc.stderr or proc.stdout or "").strip()
+            _minimax_h3_request(
+                "POST", f"/api/v1/models/{LTX25_MAESTRO_MODEL_TYPE}/download", timeout=30
+            )
         except Exception as exc:
-            last = str(exc)
-        if callable(log_fn):
-            log_fn("MiniMax Cloud: รอ SSH ของ Vast...")
-        time.sleep(5)
-    raise RuntimeError("MiniMax Cloud เข้า SSH ไม่ได้: " + last[:700])
-
-
-
-def _minimax_cloud_source_path(cloud, category, filename):
-    """Resolve a local source for H3 assets. Prefer explicit override, then Google Drive backup, then local ComfyUI."""
-    override_key = f"local_{category}_path"
-    override = str(cloud.get(override_key) or "").strip()
-    if override:
-        return Path(override)
-    drive_root = Path(r"G:\ไดรฟ์ของฉัน\MINIMAX_H3\Vast_Backup")
-    local_root = Path(r"C:\ComfyUI\models")
-    drive_path = drive_root / category / filename
-    if drive_path.is_file():
-        return drive_path
-    return local_root / category / filename
-
-
-def _minimax_cloud_sync_asset(cloud, local_path, remote_path, label, log_fn=None):
-    local_path = Path(local_path)
-    if not local_path.is_file() or local_path.stat().st_size <= 0:
-        raise RuntimeError(f"MiniMax Cloud ไม่พบ {label} ต้นทาง: {local_path}")
-    local_size = int(local_path.stat().st_size)
-    probe = _minimax_cloud_ssh(cloud, f"test -s '{remote_path}' && stat -c %s '{remote_path}' || echo 0", timeout=30, check=False)
-    try:
-        remote_size = int((probe.stdout or "0").strip().splitlines()[-1])
-    except Exception:
-        remote_size = 0
-    if remote_size == local_size:
-        if callable(log_fn): log_fn(f"MiniMax Cloud: {label} พร้อมแล้ว ({local_size} bytes)")
-        return remote_path
-    remote_dir = str(Path(remote_path).parent).replace('\\','/')
-    if callable(log_fn): log_fn(f"MiniMax Cloud: sync {label} จาก backup...")
-    _minimax_cloud_ssh(cloud, f"mkdir -p '{remote_dir}' && rm -f '{remote_path}.part'", timeout=30, check=True)
-    _minimax_cloud_scp_to(cloud, local_path, remote_path + '.part')
-    verify = _minimax_cloud_ssh(cloud, f"test -s '{remote_path}.part' && stat -c %s '{remote_path}.part' || echo 0", timeout=30, check=True)
-    try:
-        uploaded_size = int((verify.stdout or "0").strip().splitlines()[-1])
-    except Exception:
-        uploaded_size = 0
-    if uploaded_size != local_size:
-        _minimax_cloud_ssh(cloud, f"rm -f '{remote_path}.part'", timeout=30, check=False)
-        raise RuntimeError(f"MiniMax Cloud {label} sync ไม่ครบ: {uploaded_size}/{local_size} bytes")
-    _minimax_cloud_ssh(cloud, f"mv -f '{remote_path}.part' '{remote_path}'", timeout=30, check=True)
-    if callable(log_fn): log_fn(f"MiniMax Cloud: {label} พร้อม ({local_size} bytes)")
-    return remote_path
-
-
-def _minimax_cloud_bootstrap_h3(cloud, log_fn=None):
-    """Ensure all MiniMax H3 base assets exist remotely, using backup sources before network downloads."""
-    assets = [
-        ("diffusion_models", str(cloud.get("unet_name") or "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"), "/workspace/ComfyUI/models/diffusion_models", "H3 diffusion model"),
-        ("text_encoders", str(cloud.get("clip_name") or "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"), "/workspace/ComfyUI/models/text_encoders", "H3 text encoder"),
-        ("vae", str(cloud.get("video_vae_name") or "minimax_h3_video_vae_fp16.safetensors"), "/workspace/ComfyUI/models/vae", "H3 video VAE"),
-        ("vae", str(cloud.get("audio_vae_name") or "minimax_h3_audio_vae_fp32.safetensors"), "/workspace/ComfyUI/models/vae", "H3 audio VAE"),
-    ]
-    if callable(log_fn): log_fn("MiniMax Cloud: ตรวจ H3 models จาก backup...")
-    for category, filename, remote_dir, label in assets:
-        source = _minimax_cloud_source_path(cloud, category, filename)
-        _minimax_cloud_sync_asset(cloud, source, remote_dir + '/' + filename, label, log_fn=log_fn)
-    if callable(log_fn): log_fn("MiniMax Cloud: H3 models พร้อม")
-
-
-def _minimax_cloud_bootstrap_turbo_lora(cloud, log_fn=None):
-    """Ensure the custom MiniMax H3 Turbo LoRA exists remotely before workflow submit."""
-    lora_name = str(cloud.get("lora_name") or "minimax_h3_turbo_4step_ckpt500.safetensors").strip()
-    if not lora_name:
-        raise RuntimeError("MiniMax Cloud ยังไม่ได้ตั้ง lora_name")
-    local_path = _minimax_cloud_source_path(cloud, "loras", lora_name)
-    remote_dir = "/workspace/ComfyUI/models/loras"
-    remote_path = remote_dir + "/" + lora_name
-    if not local_path.is_file() or local_path.stat().st_size <= 0:
-        raise RuntimeError(f"MiniMax Cloud ไม่พบ Turbo LoRA ต้นทาง: {local_path}")
-
-    probe = _minimax_cloud_ssh(
-        cloud,
-        f"test -s '{remote_path}' && stat -c %s '{remote_path}' || echo 0",
-        timeout=30, check=False,
-    )
-    try:
-        remote_size = int((probe.stdout or "0").strip().splitlines()[-1])
-    except Exception:
-        remote_size = 0
-    local_size = int(local_path.stat().st_size)
-    if remote_size == local_size:
-        if callable(log_fn):
-            log_fn(f"MiniMax Cloud: Turbo LoRA พร้อมแล้ว ({local_size} bytes)")
-        return remote_path
-
-    if callable(log_fn):
-        if remote_size > 0:
-            log_fn(f"MiniMax Cloud: Turbo LoRA ขนาดไม่ตรง ({remote_size}/{local_size}) — sync ใหม่...")
-        else:
-            log_fn("MiniMax Cloud: อัปโหลด Turbo LoRA ไป Vast...")
-    _minimax_cloud_ssh(cloud, f"mkdir -p '{remote_dir}' && rm -f '{remote_path}.part'", timeout=30, check=True)
-    _minimax_cloud_scp_to(cloud, local_path, remote_path + ".part")
-    verify = _minimax_cloud_ssh(
-        cloud,
-        f"test -s '{remote_path}.part' && stat -c %s '{remote_path}.part' || echo 0",
-        timeout=30, check=True,
-    )
-    try:
-        uploaded_size = int((verify.stdout or "0").strip().splitlines()[-1])
-    except Exception:
-        uploaded_size = 0
-    if uploaded_size != local_size:
-        _minimax_cloud_ssh(cloud, f"rm -f '{remote_path}.part'", timeout=30, check=False)
-        raise RuntimeError(f"MiniMax Cloud Turbo LoRA sync ไม่ครบ: {uploaded_size}/{local_size} bytes")
-    _minimax_cloud_ssh(cloud, f"mv -f '{remote_path}.part' '{remote_path}'", timeout=30, check=True)
-    if callable(log_fn):
-        log_fn(f"MiniMax Cloud: Turbo LoRA พร้อม ({local_size} bytes)")
-    return remote_path
-
-
-def _minimax_cloud_build_workflow(cloud, remote_image_name, prompt, duration):
-    import random
-    width = max(32, int(cloud.get("width") or 1280))
-    height = max(32, int(cloud.get("height") or 720))
-    steps = max(1, int(cloud.get("steps") or 4))
-    strength = float(cloud.get("lora_strength") or 1.0)
-    frames = _minimax_h3_frames(duration)
-    seed = random.randint(1, 2**32 - 1)
-    prefix = f"video/SnapGen_MiniMax_Cloud_{int(time.time())}"
-    return {
-        "1": {"class_type":"UNETLoader","inputs":{"unet_name":str(cloud["unet_name"]),"weight_dtype":"default"}},
-        "2": {"class_type":"CLIPLoader","inputs":{"clip_name":str(cloud["clip_name"]),"type":"minimax","device":"default"}},
-        "3": {"class_type":"VAELoader","inputs":{"vae_name":str(cloud["video_vae_name"])}},
-        "4": {"class_type":"VAELoader","inputs":{"vae_name":str(cloud["audio_vae_name"])}},
-        "5": {"class_type":"LoadImage","inputs":{"image":remote_image_name}},
-        "6": {"class_type":"MiniMaxH3TurboLoRA","inputs":{"model":["1",0],"lora_name":str(cloud["lora_name"]),"strength":strength}},
-        "7": {"class_type":"MiniMaxH3ImageToVideo","inputs":{"clip":["2",0],"vae":["3",0],"prompt":_prepare_minimax_h3_prompt(prompt, max_chars=1200),"width":width,"height":height,"length":frames,"first_frame":["5",0]}},
-        "8": {"class_type":"RandomNoise","inputs":{"noise_seed":seed}},
-        "9": {"class_type":"BasicGuider","inputs":{"model":["6",0],"conditioning":["7",0]}},
-        "10": {"class_type":"MiniMaxH3TurboSampler","inputs":{}},
-        "11": {"class_type":"BasicScheduler","inputs":{"model":["6",0],"scheduler":"simple","steps":steps,"denoise":1.0}},
-        "12": {"class_type":"SamplerCustomAdvanced","inputs":{"noise":["8",0],"guider":["9",0],"sampler":["10",0],"sigmas":["11",0],"latent_image":["7",1]}},
-        "13": {"class_type":"VAEDecode","inputs":{"samples":["12",0],"vae":["3",0]}},
-        "14": {"class_type":"VAEDecodeAudio","inputs":{"samples":["12",0],"vae":["4",0]}},
-        "15": {"class_type":"CreateVideo","inputs":{"images":["13",0],"audio":["14",0],"fps":24.0,"bit_depth":8}},
-        "16": {"class_type":"SaveVideo","inputs":{"video":["15",0],"filename_prefix":prefix,"format":"mp4","codec":"auto"}},
-    }, frames, width, height, steps
-
-
-def _generate_minimax_cloud(i, img, prompt, cfg):
-    try:
-        import requests
-    except Exception as exc:
-        raise RuntimeError(f"MiniMax Cloud ต้องใช้ requests: {exc}")
-    log_fn = lambda msg: g["append_log"](i, msg)
-    cloud = _load_minimax_cloud_config()
-    cloud = _minimax_cloud_prepare_instance(cloud, log_fn=log_fn)
-    tunnel = None
-    try:
-        _minimax_cloud_wait_ssh(cloud, log_fn=log_fn)
-        _minimax_cloud_bootstrap_h3(cloud, log_fn=log_fn)
-        _minimax_cloud_bootstrap_turbo_lora(cloud, log_fn=log_fn)
-        status = _minimax_cloud_ssh(cloud, "supervisorctl status comfyui", timeout=30, check=False)
-        if "RUNNING" not in (status.stdout or ""):
-            log_fn("MiniMax Cloud: กำลังเปิด ComfyUI บน Vast...")
-            _minimax_cloud_ssh(cloud, "supervisorctl restart comfyui", timeout=60, check=True)
-            time.sleep(8)
-        remote_name = f"snapgen_cloud_{i+1}_{int(time.time())}_{Path(img).name}"
-        remote_name = re.sub(r"[^A-Za-z0-9._-]+", "_", remote_name)
-        _minimax_cloud_ssh(cloud, "mkdir -p /workspace/ComfyUI/input /workspace/ComfyUI/output/video")
-        log_fn("MiniMax Cloud: อัปโหลด Start Frame ไป Vast...")
-        _minimax_cloud_scp_to(cloud, img, f"/workspace/ComfyUI/input/{remote_name}")
-        local_port = int(cloud.get("local_tunnel_port") or 18189) + int(i)
-        remote_port = int(cloud.get("remote_comfy_port") or 18188)
-        tunnel_cmd = _minimax_cloud_ssh_base(cloud)[:-1] + [
-            "-N", "-L", f"{local_port}:127.0.0.1:{remote_port}",
-            _minimax_cloud_ssh_base(cloud)[-1],
-        ]
-        tunnel = subprocess.Popen(tunnel_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-        base_url = f"http://127.0.0.1:{local_port}"
-        ready = False
-        for _ in range(60):
-            if tunnel.poll() is not None:
-                detail = tunnel.stderr.read() if tunnel.stderr else ""
-                raise RuntimeError("MiniMax Cloud SSH tunnel หลุด: " + detail[:700])
-            try:
-                r = requests.get(base_url + "/api/system_stats", timeout=3)
-                if r.ok:
-                    ready = True
-                    break
-            except Exception:
-                pass
-            time.sleep(2)
-        if not ready:
-            raise RuntimeError("MiniMax Cloud: ComfyUI API บน Vast ไม่พร้อม")
-        duration_var = cfg.get("duration") if isinstance(cfg, dict) else None
-        duration = duration_var.get() if hasattr(duration_var, "get") else "5"
-        workflow, frames, width, height, steps = _minimax_cloud_build_workflow(cloud, remote_name, prompt, duration)
-        log_fn(f"MiniMax Cloud: Submit H3 | {width}x{height} | {frames} เฟรม | {steps} steps")
-        submitted = requests.post(base_url + "/prompt", json={"prompt": workflow}, timeout=120)
-        if not submitted.ok:
-            raise RuntimeError(f"MiniMax Cloud submit {submitted.status_code}: {submitted.text[:1000]}")
-        prompt_id = str(submitted.json().get("prompt_id") or "")
-        if not prompt_id:
-            raise RuntimeError("MiniMax Cloud ไม่คืน prompt_id")
-        started = time.time()
-        while time.time() - started < 7200:
+            log(f"FAILED to start LTX-2.5 download: {exc}")
+            raise
+        last_message = ""
+        last_percent = -1
+        for _ in range(2160):  # 3 hours; the download itself remains in Maestro.
             time.sleep(5)
-            history = requests.get(base_url + f"/history/{prompt_id}", timeout=30).json()
-            if prompt_id not in history:
-                elapsed = int(time.time() - started)
-                _show_local_progress(i, "MiniMax Cloud", {"progress": min(95, 1 + elapsed // 6), "message": f"กำลังสร้าง {elapsed}s"})
-                continue
-            item = history[prompt_id]
-            status_data = item.get("status") or {}
-            messages = status_data.get("messages") or []
-            if any(m and m[0] == "execution_error" for m in messages):
-                raise RuntimeError("MiniMax Cloud generation error: " + json.dumps(messages, ensure_ascii=False)[:1400])
-            if not status_data.get("completed"):
-                continue
-            output_item = None
-            for node in (item.get("outputs") or {}).values():
-                for key in ("videos", "gifs", "images"):
-                    for out in node.get(key, []) or []:
-                        if isinstance(out, dict) and out.get("filename"):
-                            output_item = out
-                            break
-                    if output_item:
-                        break
-                if output_item:
-                    break
-            if not output_item:
-                raise RuntimeError("MiniMax Cloud งานเสร็จแต่ไม่พบไฟล์ output")
-            filename = str(output_item.get("filename"))
-            subfolder = str(output_item.get("subfolder") or "")
-            remote_path = "/workspace/ComfyUI/output/" + ((subfolder.rstrip("/") + "/") if subfolder else "") + filename
-            export_dir = Path(g.get("EXPORT_VIDEO") or globals().get("EXPORT_VIDEO") or (BASE / "exports" / "video"))
-            export_dir.mkdir(parents=True, exist_ok=True)
-            dst = _unique_video_path(Path(filename).stem, Path(filename).suffix or ".mp4")
-            log_fn("MiniMax Cloud: ดาวน์โหลด MP4 กลับ SnapGen...")
-            _minimax_cloud_scp_from(cloud, remote_path, dst)
-            elapsed = time.time() - started
-            log_fn(f"MiniMax Cloud เสร็จแล้ว {elapsed:.1f}s: {dst}")
-            return str(dst)
-        raise RuntimeError("MiniMax Cloud ใช้เวลานานเกิน 2 ชั่วโมง")
-    finally:
-        if tunnel is not None and tunnel.poll() is None:
+            if _ltx25_maestro_downloaded():
+                if callable(progress_fn):
+                    progress_fn(100, "ครบทุกไฟล์", "done")
+                log("ดาวน์โหลด LTX-2.5 Distilled + Fast VAE เสร็จแล้ว")
+                return
             try:
-                tunnel.terminate()
-                tunnel.wait(timeout=5)
+                active_progress = _ltx25_active_download_progress()
             except Exception:
-                try: tunnel.kill()
-                except Exception: pass
-        _minimax_cloud_cleanup_auto_instance(cloud, log_fn=log_fn)
+                active_progress = None
+            if active_progress is not None:
+                percent, filename, download_status = active_progress
+                if percent != last_percent:
+                    state_text = " — การเชื่อมต่อช้า/กำลังลองใหม่" if download_status == "stalled" else ""
+                    log(f"LTX-2.5 โหลด {filename}: {percent}%{state_text}")
+                    if callable(progress_fn):
+                        progress_fn(percent, filename, download_status)
+                    last_percent = percent
+            progress = _minimax_h3_request(
+                "GET", "/api/v1/models/downloads/status", timeout=30
+            ).get("downloads", {}).get(LTX25_MAESTRO_MODEL_TYPE, {})
+            status = str(progress.get("status", "")).lower()
+            message = str(progress.get("message") or progress.get("error") or "")
+            if status in {"failed", "error", "cancelled"}:
+                log(f"FAILED LTX-2.5 download: {message or status}")
+                raise RuntimeError(message or "Maestro ดาวน์โหลด LTX-2.5 ไม่สำเร็จ")
+            if message and message != last_message:
+                log(f"LTX-2.5: {message}")
+                last_message = message
+        log("FAILED LTX-2.5 download: timeout after 3 hours")
+        raise RuntimeError("ดาวน์โหลด LTX-2.5 ใช้เวลานานเกินกำหนด")
 
 
-def _generate_ltx23_local(i, img, prompt, cfg):
+def _ltx25_maestro_log(i, message):
+    _snapgen_after(0, lambda: g["append_log"](i, message))
+
+
+def _start_ltx25_maestro_action(i, delete=False):
+    if delete and not messagebox.askokcancel(
+        "ลบ LTX-2.5", "ลบ LTX-2.5 Distilled + Fast VAE ออกจาก Maestro ใช่ไหม?"
+    ):
+        return
+
+    def worker():
+        try:
+            if delete:
+                _ensure_minimax_h3_backend(lambda text: _ltx25_maestro_log(i, text))
+                result = _minimax_h3_request(
+                    "DELETE", f"/api/v1/models/{LTX25_MAESTRO_MODEL_TYPE}", timeout=300
+                )
+                skipped = result.get("skipped_linked", [])
+                if skipped:
+                    _maestro_log_event("LTX-2.5 delete skipped: model files are linked from another folder")
+                    _ltx25_maestro_log(i, "LTX-2.5 ถูกเชื่อมจากโฟลเดอร์อื่น จึงไม่ลบไฟล์ต้นทาง")
+                else:
+                    _maestro_log_event("LTX-2.5 model files deleted")
+                    _ltx25_maestro_log(i, "ลบ LTX-2.5 Distilled + Fast VAE แล้ว")
+            else:
+                _ensure_ltx25_maestro_model(lambda text: _ltx25_maestro_log(i, text))
+        except Exception as exc:
+            _maestro_log_event(f"FAILED LTX-2.5 model action: {exc}")
+            _ltx25_maestro_log(i, f"LTX-2.5: {exc}")
+
+    threading.Thread(target=worker, name="snapgen-ltx25-model", daemon=True).start()
+
+
+def _add_ltx25_maestro_controls(i):
+    """Place the two model controls in the slot settings dialog once."""
+    dialogs = [child for child in root.winfo_children() if isinstance(child, tk.Toplevel)]
+    if not dialogs:
+        return
+    dialog = dialogs[-1]
+    if getattr(dialog, "_snapgen_ltx25_controls", False):
+        return
+    dialog._snapgen_ltx25_controls = True
+    frame = tk.LabelFrame(dialog, text="LTX-2.5 Distilled + Fast VAE (Maestro)")
+    frame.pack(fill="x", padx=12, pady=(4, 10))
+    tk.Label(frame, text="กดสร้างวิดีโอแล้วติดตั้งให้อัตโนมัติ หากยังไม่มีโมเดล").pack(
+        side="left", padx=(8, 12), pady=6
+    )
+    tk.Button(frame, text="ติดตั้งโมเดล", command=lambda: _start_ltx25_maestro_action(i)).pack(
+        side="left", padx=4, pady=6
+    )
+    tk.Button(frame, text="ลบโมเดล", command=lambda: _start_ltx25_maestro_action(i, delete=True)).pack(
+        side="left", padx=(4, 8), pady=6
+    )
+
+
+def _generate_ltx23_local(i, img, prompt, cfg, *, ltx25=False):
     log_fn = lambda msg: g["append_log"](i, msg)
+    model_name = "LTX-2.5 Fast VAE" if ltx25 else "LTX-2.3"
     _ensure_minimax_h3_backend(log_fn)
-    _configure_maestro_vram(0.80, "LTX-2.3", log_fn)
-    log_fn("อัปโหลดเฟรมเริ่มต้นเข้า LTX-2.3 Distilled Local...")
+    _configure_maestro_vram(0.80, model_name, log_fn)
+    if ltx25:
+        def update_model_download(percent, filename, download_status):
+            suffix = " (กำลังลองใหม่)" if download_status == "stalled" else ""
+            _snapgen_after(
+                0,
+                lambda: g["set_slot_state"](
+                    i, "loading", f"LTX-2.5 โหลดโมเดล {percent}%{suffix}"
+                ),
+            )
+
+        _ensure_ltx25_maestro_model(log_fn, update_model_download)
+    log_fn(f"อัปโหลดเฟรมเริ่มต้นเข้า {model_name} Local...")
     with open(img, "rb") as fh:
         uploaded = _minimax_h3_request(
             "POST", "/api/v1/upload", files={"file": (Path(img).name, fh)}, timeout=180,
         )
     image_path = str(uploaded.get("path") or uploaded.get("filename") or "").strip()
     if not image_path:
-        raise RuntimeError(f"LTX-2.3 ไม่คืน path ของรูป: {uploaded}")
+        raise RuntimeError(f"{model_name} ไม่คืน path ของรูป: {uploaded}")
     duration_var = cfg.get("duration") if isinstance(cfg, dict) else None
     duration = duration_var.get() if hasattr(duration_var, "get") else "5"
-    frames = _ltx23_frames(duration)
+    frames = _ltx25_frames(duration) if ltx25 else _ltx23_frames(duration)
+    resolution = _ltx25_resolution(cfg) if ltx25 else _ltx23_resolution(cfg)
     body = {
-        "model_type": "ltx2_22B_distilled_1_1",
+        "model_type": "ltx2_25" if ltx25 else "ltx2_22B_distilled_1_1",
         "prompt": prompt,
-        "resolution": "1280x720",
+        "resolution": resolution,
         "num_inference_steps": 8,
         "video_length": frames,
         "guidance_scale": 1.0,
@@ -3676,7 +3602,7 @@ def _generate_ltx23_local(i, img, prompt, cfg):
         "image_mode": 0,
         "image_start": image_path,
         "image_prompt_type": "S",
-        "input_video_strength": 0.7,
+        "input_video_strength": 0.75 if ltx25 else 0.5,
         "audio_prompt_type": "",
         "guidance_phases": 2,
         "sample_solver": "euler",
@@ -3687,38 +3613,40 @@ def _generate_ltx23_local(i, img, prompt, cfg):
         "negative_prompt": "",
         "settings_version": 2.57,
     }
+    if ltx25:
+        body["ltx25_video_vae"] = "fast"
     submitted = _minimax_h3_request("POST", "/api/v1/generate", json=body, timeout=180)
     job_id = str(submitted.get("job_id") or "").strip()
     if not job_id:
-        raise RuntimeError(f"LTX-2.3 ไม่คืน job_id: {submitted}")
-    log_fn(f"LTX-2.3 Local เริ่มงาน {job_id} | {frames} เฟรม | 1280x720 | 8 steps")
+        raise RuntimeError(f"{model_name} ไม่คืน job_id: {submitted}")
+    log_fn(f"{model_name} Local เริ่มงาน {job_id} | {frames} เฟรม | {resolution} | 8 steps")
     last_message = ""
     for _ in range(1440):
         time.sleep(5)
         status = _minimax_h3_request("GET", f"/api/v1/status/{job_id}", timeout=30)
         state = str(status.get("status") or "").lower()
-        message = _show_local_progress(i, "LTX-2.3", status)
+        message = _show_local_progress(i, model_name, status)
         if message and message != last_message:
             log_fn(message)
             last_message = message
         if state == "completed":
             outputs = status.get("output_files") or []
             if not outputs:
-                raise RuntimeError("LTX-2.3 งานเสร็จแต่ไม่พบไฟล์วิดีโอ")
+                raise RuntimeError(f"{model_name} งานเสร็จแต่ไม่พบไฟล์วิดีโอ")
             src = MINIMAX_H3_OUTPUTS / Path(str(outputs[0])).name
             if not src.is_file():
-                raise RuntimeError(f"ไม่พบไฟล์ผลลัพธ์ LTX-2.3: {src}")
+                raise RuntimeError(f"ไม่พบไฟล์ผลลัพธ์ {model_name}: {src}")
             export_dir = Path(g.get("EXPORT_VIDEO") or globals().get("EXPORT_VIDEO") or (BASE / "exports" / "video"))
             export_dir.mkdir(parents=True, exist_ok=True)
             dst = export_dir / src.name
             if dst.exists():
                 dst = export_dir / f"{src.stem}_{int(time.time())}{src.suffix}"
             shutil.copy2(src, dst)
-            log_fn(f"บันทึก LTX-2.3 Distilled Local แล้ว: {dst}")
+            log_fn(f"บันทึก {model_name} Local แล้ว: {dst}")
             return str(dst)
         if state in ("failed", "cancelled"):
-            raise RuntimeError(str(status.get("error") or status.get("message") or "LTX-2.3 generation failed"))
-    raise RuntimeError("LTX-2.3 ใช้เวลานานเกินกำหนด")
+            raise RuntimeError(str(status.get("error") or status.get("message") or f"{model_name} generation failed"))
+    raise RuntimeError(f"{model_name} ใช้เวลานานเกินกำหนด")
 
 
 def _generate_minimax_h3_local(i, img, prompt, cfg):
@@ -3795,7 +3723,12 @@ def _generate_minimax_h3_local(i, img, prompt, cfg):
 
 def _add_minimax_h3_to_model_menu(i):
     try:
-        model_var = g["slot_cfg_vars"][i]["model"]
+        cfg = g["slot_cfg_vars"][i]
+        model_var = cfg["model"]
+        resolution_var = cfg.get("resolution")
+        duration_var = cfg.get("duration")
+        aspect_var = cfg.get("aspect")
+        veo3_voice_label = "Veo 3 Lite — เสียงบทพูดไทย"
     except Exception:
         return
     def scan(widget):
@@ -3805,33 +3738,202 @@ def _add_minimax_h3_to_model_menu(i):
             if tv == str(model_var):
                 if cls in ("TCombobox", "Combobox"):
                     values = list(widget.cget("values") or ())
-                    local_values = [MINIMAX_H3_LOCAL_MODEL, MINIMAX_CLOUD_MODEL, LTX23_LOCAL_MODEL]
-                    missing_values = [value for value in local_values if value not in values]
-                    if missing_values:
-                        widget.configure(values=values + missing_values)
+                    retired_values = {MINIMAX_H3_LOCAL_MODEL, LTX23_CLOUD_MODEL}
+                    grouped_values = [
+                        LTX23_LOCAL_MODEL,
+                        LTX25_MAESTRO_MODEL,
+                    ]
+                    paid_values = [VELA_VIDEO_MODEL, GROK_LOWER_MODEL]
+                    current_paid = [
+                        value for value in values
+                        if value not in grouped_values and value not in retired_values
+                    ]
+                    current_local = [value for value in values if value in grouped_values]
+                    widget.configure(values=(
+                        [value for value in paid_values if value not in current_paid]
+                        + current_paid
+                        + current_local
+                        + [value for value in grouped_values if value not in current_local]
+                    ))
+                else:
+                    menu = widget["menu"]
+                    paid_header = "โมเดล SnapGen — เสียเครดิต"
+                    local_header = "โมเดล Local — ใช้เครื่องตัวเอง"
+                    retired_labels = {
+                        MINIMAX_H3_LOCAL_MODEL, MINIMAX_H3_LOCAL_LABEL,
+                        LTX23_CLOUD_MODEL, LTX23_CLOUD_LABEL,
+                    }
+
+                    end = menu.index("end")
+                    for menu_index in range((end if end is not None else -1), -1, -1):
+                        try:
+                            if str(menu.entrycget(menu_index, "label")) in retired_labels:
+                                menu.delete(menu_index)
+                        except Exception:
+                            pass
+
+                    def menu_labels():
+                        labels = []
+                        end = menu.index("end")
+                        for menu_index in range((end if end is not None else -1) + 1):
+                            try:
+                                labels.append(str(menu.entrycget(menu_index, "label")))
+                            except Exception:
+                                labels.append("")
+                        return labels
+
+                    labels = menu_labels()
+                    if paid_header not in labels:
+                        menu.insert_command(0, label=paid_header, state="disabled")
+                    labels = menu_labels()
+                    if VELA_VIDEO_MODEL not in labels and VELA_VIDEO_LABEL not in labels:
+                        menu.insert_command(1, label=VELA_VIDEO_LABEL, command=lambda: model_var.set(VELA_VIDEO_MODEL))
+
+                    labels = menu_labels()
+                    if GROK_LOWER_MODEL not in labels and GROK_LOWER_LABEL not in labels:
+                        menu.insert_command(2, label=GROK_LOWER_LABEL, command=lambda: model_var.set(GROK_LOWER_MODEL))
+
+                    labels = menu_labels()
+                    if veo3_voice_label not in labels:
+                        def choose_veo3_voice():
+                            model_var.set("veo-3.1-lite")
+                            g["_veo3_voice_state"][i] = {"enabled": True, "profile": "เสียงกลาง"}
+                            dialogue_var = cfg.get("dialogue")
+                            if hasattr(dialogue_var, "set") and not str(dialogue_var.get() or "").strip():
+                                dialogue_var.set("มีบทพูด")
+                            refresh = g.get("refresh_veo3_voice_controls")
+                            if callable(refresh):
+                                refresh(i)
+
+                        first_separator = next(
+                            (idx for idx in range((menu.index("end") or -1) + 1) if menu.type(idx) == "separator"),
+                            None,
+                        )
+                        insert_at = first_separator if first_separator is not None else "end"
+                        menu.insert_command(insert_at, label=veo3_voice_label, command=choose_veo3_voice)
+
+                    labels = menu_labels()
+                    if local_header not in labels:
+                        menu.add_separator()
+                        menu.add_command(label=local_header, state="disabled")
+                    labels = menu_labels()
+                    if LTX23_LOCAL_MODEL not in labels and LTX23_LOCAL_LABEL not in labels:
+                        menu.add_command(label=LTX23_LOCAL_LABEL, command=lambda: model_var.set(LTX23_LOCAL_MODEL))
+                    if LTX25_MAESTRO_MODEL not in labels and LTX25_MAESTRO_LABEL not in labels:
+                        menu.add_command(label=LTX25_MAESTRO_LABEL, command=lambda: model_var.set(LTX25_MAESTRO_MODEL))
+            elif (
+                resolution_var is not None
+                and tv == str(resolution_var)
+                and str(model_var.get() or "") == GROK_LOWER_MODEL
+            ):
+                if cls in ("TCombobox", "Combobox"):
+                    widget.configure(values=("480p", "720p"))
+                else:
+                    menu = widget["menu"]
+                    menu.delete(0, "end")
+                    for value in ("480p", "720p"):
+                        menu.add_command(
+                            label=value,
+                            command=lambda selected=value: resolution_var.set(selected),
+                        )
+            elif (
+                duration_var is not None
+                and tv == str(duration_var)
+                and str(model_var.get() or "") in (
+                    GROK_LOWER_MODEL,
+                    LTX23_LOCAL_MODEL,
+                    LTX25_MAESTRO_MODEL,
+                    LTX23_CLOUD_MODEL,
+                )
+            ):
+                if str(model_var.get() or "") == GROK_LOWER_MODEL:
+                    if cls in ("TCombobox", "Combobox"):
+                        widget.configure(values=GROK_LOWER_DURATIONS)
+                    else:
+                        menu = widget["menu"]
+                        menu.delete(0, "end")
+                        for value in GROK_LOWER_DURATIONS:
+                            menu.add_command(
+                                label=value,
+                                command=lambda selected=value: duration_var.set(selected),
+                            )
+                    if str(duration_var.get() or "").strip() not in GROK_LOWER_DURATIONS:
+                        duration_var.set(GROK_LOWER_DURATIONS[0])
+                    return
+                # Both LTX backends support a real 15-second request.  The
+                # Comfy workflow rounds this to the required 8n+1 frame count.
+                if cls in ("TCombobox", "Combobox"):
+                    values = list(widget.cget("values") or ())
+                    if "15" not in [str(value) for value in values]:
+                        widget.configure(values=values + ["15"])
                 else:
                     menu = widget["menu"]
                     labels = []
                     try:
                         end = menu.index("end")
                         for idx in range((end or -1) + 1):
-                            try:
-                                labels.append(str(menu.entrycget(idx, "label")))
-                            except Exception:
-                                pass
+                            labels.append(str(menu.entrycget(idx, "label")))
                     except Exception:
                         pass
-                    missing_h3 = MINIMAX_H3_LOCAL_MODEL not in labels and MINIMAX_H3_LOCAL_LABEL not in labels
-                    missing_cloud = MINIMAX_CLOUD_MODEL not in labels and MINIMAX_CLOUD_LABEL not in labels
-                    missing_ltx = LTX23_LOCAL_MODEL not in labels and LTX23_LOCAL_LABEL not in labels
-                    if missing_h3 or missing_cloud or missing_ltx:
-                        menu.add_separator()
-                    if missing_h3:
-                        menu.add_command(label=MINIMAX_H3_LOCAL_LABEL, command=lambda: model_var.set(MINIMAX_H3_LOCAL_MODEL))
-                    if missing_cloud:
-                        menu.add_command(label=MINIMAX_CLOUD_LABEL, command=lambda: model_var.set(MINIMAX_CLOUD_MODEL))
-                    if missing_ltx:
-                        menu.add_command(label=LTX23_LOCAL_LABEL, command=lambda: model_var.set(LTX23_LOCAL_MODEL))
+                    if "15" not in labels:
+                        menu.add_command(label="15", command=lambda: duration_var.set("15"))
+            elif aspect_var is not None and tv == str(aspect_var):
+                if cls in ("TCombobox", "Combobox"):
+                    values = list(widget.cget("values") or ())
+                    if VIDEO_AUTO_ASPECT not in [str(item) for item in values]:
+                        values.insert(0, VIDEO_AUTO_ASPECT)
+                    additions = [
+                        value for value in ("9:16", "1:1")
+                        if value not in [str(item) for item in values]
+                    ]
+                    if additions or values != list(widget.cget("values") or ()):
+                        widget.configure(values=values + additions)
+                else:
+                    menu = widget["menu"]
+                    labels = []
+                    try:
+                        end = menu.index("end")
+                        for idx in range((end or -1) + 1):
+                            labels.append(str(menu.entrycget(idx, "label")))
+                    except Exception:
+                        pass
+                    if VIDEO_AUTO_ASPECT_LABEL not in labels:
+                        menu.insert_command(
+                            0,
+                            label=VIDEO_AUTO_ASPECT_LABEL,
+                            command=lambda: aspect_var.set(VIDEO_AUTO_ASPECT),
+                        )
+                        labels.insert(0, VIDEO_AUTO_ASPECT_LABEL)
+                    for value in ("9:16", "1:1"):
+                        if value not in labels:
+                            menu.add_command(
+                                label=value,
+                                command=lambda selected=value: aspect_var.set(selected),
+                            )
+        except Exception:
+            pass
+        try:
+            if (
+                cls in ("Button", "TButton")
+                and str(widget.cget("text")).strip().upper() == "OK"
+                and not getattr(widget, "_snapgen_vertical_aspect_ok", False)
+            ):
+                original_command = str(widget.cget("command") or "").strip()
+                if original_command:
+                    def submit_preserving_vertical(button=widget, command=original_command):
+                        keep_vertical = (
+                            str(model_var.get() or "").strip()
+                            in ("veo-2", "veo-3.1-lite", VELA_VIDEO_MODEL, GROK_LOWER_MODEL)
+                            and str(aspect_var.get() or "").strip() == "9:16"
+                        )
+                        try:
+                            return button.tk.call(command)
+                        finally:
+                            if keep_vertical:
+                                aspect_var.set("9:16")
+
+                    widget.configure(command=submit_preserving_vertical)
+                    widget._snapgen_vertical_aspect_ok = True
         except Exception:
             pass
         try:
@@ -3887,10 +3989,18 @@ def _install_actual_video_credit():
                 for key in ("model", "resolution", "duration", "aspect", "mode"):
                     var = cfg.get(key) if isinstance(cfg, dict) else None
                     if hasattr(var, "trace_add") and not getattr(var, "_snapgen_actual_credit_watch", False):
-                        def _on_change(*_args, i=idx):
+                        def _on_change(*_args, i=idx, changed_key=key):
                             clear_slot_actual_if_config_changed(i)
                             _refresh_actual_slot_cfg_label(i)
                             _refresh_slot_config_credit_labels(i)
+                            if changed_key == "model":
+                                try:
+                                    # Run after the recovered core's own model
+                                    # callback so it cannot restore 16:9 after
+                                    # the user has just selected another model.
+                                    root.after_idle(lambda slot=i: _set_video_aspect_auto_for_model(slot))
+                                except Exception:
+                                    _set_video_aspect_auto_for_model(i)
                         var.trace_add("write", _on_change)
                         try:
                             var._snapgen_actual_credit_watch = True
@@ -3898,17 +4008,58 @@ def _install_actual_video_credit():
                             pass
         except Exception:
             pass
+        try:
+            for idx, image_var in enumerate(g.get("slot_images") or []):
+                if hasattr(image_var, "trace_add") and not getattr(image_var, "_snapgen_auto_aspect_watch", False):
+                    image_var.trace_add(
+                        "write",
+                        lambda *_args, i=idx: (_refresh_actual_slot_cfg_label(i), _refresh_slot_config_credit_labels(i)),
+                    )
+                    try:
+                        image_var._snapgen_auto_aspect_watch = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     sanitize_all_video_models()
     bind_credit_cfg_watchers()
 
+    # The main Video controls already exist when this patch is installed.
+    # If LTX Local was restored from disk at startup, no model write event is
+    # emitted, so the watcher above cannot add its 15-second duration entry.
+    # Synchronize every Slot once now and again after Tk has finished laying
+    # out delayed widgets.
+    def sync_local_video_menus():
+        for idx in range(len(g.get("slot_cfg_vars") or [])):
+            _add_minimax_h3_to_model_menu(idx)
+
+    sync_local_video_menus()
+    try:
+        root.after(100, sync_local_video_menus)
+        root.after(500, sync_local_video_menus)
+        root.after(1500, sync_local_video_menus)
+    except Exception:
+        pass
+
     orig_open_slot_config = g.get("open_slot_config")
     if callable(orig_open_slot_config) and not getattr(orig_open_slot_config, "_actual_credit_wrapper", False):
         def open_slot_config(i, *args, **kwargs):
+            cfg = g["slot_cfg_vars"][i]
+            model_before = str(cfg["model"].get() or "").strip()
+            aspect_before = str(cfg["aspect"].get() or "").strip()
             result = orig_open_slot_config(i, *args, **kwargs)
+            if (
+                model_before in ("veo-2", "veo-3.1-lite")
+                and aspect_before == "9:16"
+            ) or (
+                model_before == GROK_LOWER_MODEL
+                and aspect_before in ("9:16", "1:1")
+            ):
+                cfg["aspect"].set(aspect_before)
             try:
-                root.after(30, lambda idx=i: (_refresh_slot_config_credit_labels(idx), _add_minimax_h3_to_model_menu(idx)))
-                root.after(200, lambda idx=i: (_refresh_slot_config_credit_labels(idx), _add_minimax_h3_to_model_menu(idx)))
+                root.after(30, lambda idx=i: (_refresh_slot_config_credit_labels(idx), _add_minimax_h3_to_model_menu(idx), _add_ltx25_maestro_controls(idx)))
+                root.after(200, lambda idx=i: (_refresh_slot_config_credit_labels(idx), _add_minimax_h3_to_model_menu(idx), _add_ltx25_maestro_controls(idx)))
             except Exception:
                 pass
             return result
@@ -3926,17 +4077,143 @@ def _install_actual_video_credit():
         _refresh_actual_slot_cfg_label(i)
     g["refresh_slot_cfg_label"] = refresh_slot_cfg_label
 
+    VEO3_THAI_VOICE_PROFILES = {
+        "ผู้หญิงแก่": "elderly Thai woman, warm mature female voice",
+        "ผู้ชายแก่": "elderly Thai man, warm mature male voice",
+        "แม่": "Thai mother, caring adult female voice",
+        "พ่อ": "Thai father, calm adult male voice",
+        "ผู้หญิง": "adult Thai woman, clear natural voice",
+        "ผู้ชาย": "adult Thai man, clear natural voice",
+        "วัยรุ่นหญิง": "Thai teenage girl, natural youthful voice",
+        "วัยรุ่นชาย": "Thai teenage boy, natural youthful voice",
+        "เด็กผู้หญิง": "Thai young girl, child voice",
+        "เด็กผู้ชาย": "Thai young boy, child voice",
+        "เสียงกลาง": "neutral adult Thai narrator voice",
+    }
+    VEO3_THAI_VOICE_MEDIA_IDS = {
+        "ผู้หญิงแก่": "gacrux", "ผู้ชายแก่": "algenib",
+        "แม่": "aoede", "พ่อ": "algieba",
+        "ผู้หญิง": "kore", "ผู้ชาย": "orus",
+        "วัยรุ่นหญิง": "leda", "วัยรุ่นชาย": "puck",
+        "เด็กผู้หญิง": "zephyr", "เด็กผู้ชาย": "fenrir",
+        "เสียงกลาง": "pulcherrima",
+    }
+    g["_veo3_voice_media_ids"] = VEO3_THAI_VOICE_MEDIA_IDS
+    VEO3_THAI_SPEECH_EMOTIONS = {
+        "ตาม Prompt": "natural, context-appropriate delivery",
+        "ดีใจ": "happy, warm and lively delivery",
+        "เศร้า": "sad, soft and restrained delivery",
+        "สงสัย": "curious, questioning delivery",
+        "งง": "confused, hesitant delivery",
+        "โกรธ": "angry but controlled delivery",
+        "ตกใจ": "surprised delivery",
+        "กังวล": "worried, tense delivery",
+        "มั่นใจ": "calm, confident delivery",
+        "ร้องไห้": "tearful, emotionally sad delivery",
+    }
+    g["_veo3_voice_state"] = {}
+    for _slot_cfg in g.get("slot_cfg_vars") or []:
+        if isinstance(_slot_cfg, dict):
+            _slot_cfg.pop("_veo3_voice_dialogue", None)
+            _slot_cfg.pop("_veo3_voice_profile", None)
+
+    def _veo3_voice_prompt(profile, dialogue, emotion="ตาม Prompt"):
+        voice = VEO3_THAI_VOICE_PROFILES.get(profile, VEO3_THAI_VOICE_PROFILES["เสียงกลาง"])
+        delivery = VEO3_THAI_SPEECH_EMOTIONS.get(emotion, VEO3_THAI_SPEECH_EMOTIONS["ตาม Prompt"])
+        dialogue = re.sub(
+            r"^\s*ผู้พูด\s*:[^\r\n]*?(?:[\r\n]+|\s+)บทพูด\s*:\s*",
+            "", str(dialogue), count=1,
+        ).strip()
+        return (
+            f"Create an isolated Thai speech recording only. Voice: {voice}. Delivery: {delivery}.\n"
+            f"Speak exactly this Thai dialogue naturally and clearly:\n{dialogue}\n\n"
+            "The only audible content must be the dialogue above. Do not read labels or instructions aloud. "
+            "No music, singing, background music, sound effects, ambience, crowd, narration, or other voices."
+        )
+
+    def _extract_veo3_voice_audio(i, before_files):
+        video_dir = Path(g.get("EXPORT_VIDEO") or EXPORT_VIDEO)
+        candidates = [path for path in video_dir.glob("*.*") if path.suffix.lower() in {".mp4", ".mov", ".webm"} and path not in before_files]
+        if not candidates:
+            raise RuntimeError("Veo 3 เสร็จแล้ว แต่ไม่พบไฟล์วิดีโอสำหรับดึงเสียง")
+        source = max(candidates, key=lambda path: path.stat().st_mtime)
+        audio_dir = Path(g.get("EXPORT_AUDIO") or EXPORT_AUDIO)
+        audio_dir.mkdir(parents=True, exist_ok=True)
+        output = audio_dir / f"{source.stem}_voice.mp3"
+        if output.exists():
+            output = audio_dir / f"{source.stem}_voice_{int(time.time())}.mp3"
+        ffmpeg = _slow2x_mod.ensure_ffmpeg_tool(
+            lambda message: g["append_log"](i, str(message))
+        )
+        result = subprocess.run(
+            [ffmpeg, "-y", "-i", str(source), "-vn", "-c:a", "libmp3lame", "-q:a", "2", str(output)],
+            capture_output=True, encoding="utf-8", errors="replace", timeout=300,
+        )
+        if result.returncode or not output.is_file() or output.stat().st_size == 0:
+            raise RuntimeError((result.stderr or result.stdout or "ดึงเสียงจาก Veo 3 ไม่สำเร็จ")[-700:])
+        from snapgen_voice_clean import clean_voice
+
+        g["append_log"](i, "ดึงเสียงแล้ว — กำลังล้างเพลงและเพิ่มคุณภาพเสียงอัตโนมัติ...")
+        cleaned = clean_voice(output, ffmpeg)
+        output.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+        g.setdefault("_veo3_voice_last_audio", {})[i] = str(cleaned)
+        g["append_log"](i, f"บันทึกเสียงสะอาดแล้ว: {cleaned}")
+        return cleaned
+
+
+    def _install_veo3_voice_controls():
+        for index, prompt_box in enumerate(g.get("slot_prompts") or []):
+            if getattr(prompt_box, "_snapgen_veo3_voice_controls", None):
+                continue
+            cfg = g["slot_cfg_vars"][index]
+            frame = tk.Frame(prompt_box, bg="#FAFAF7", bd=0)
+            tk.Label(frame, text="เสียง Veo 3", bg="#FAFAF7", fg="#7C3AED", font=(SNAPGEN_UI_FONT, 8, "bold")).pack(side="left", padx=(0, 3))
+            selected = tk.StringVar(value="เลือกผู้พูด")
+            picker = ttk.Combobox(frame, textvariable=selected, values=list(VEO3_THAI_VOICE_PROFILES), state="readonly", width=14)
+            picker.pack(side="left")
+
+            def choose(_event=None, idx=index, box=prompt_box, source=selected, slot_cfg=cfg):
+                profile = source.get().strip()
+                if profile not in VEO3_THAI_VOICE_PROFILES:
+                    return
+                g["_veo3_voice_state"][idx] = {"enabled": True, "profile": profile}
+                slot_cfg["model"].set("veo-3.1-lite")
+                box.delete("1.0", tk.END)
+                box.insert("1.0", f"ผู้พูด: {profile}\nบทพูด: ")
+                box.focus_set()
+
+            picker.bind("<<ComboboxSelected>>", choose)
+            frame.place(relx=1.0, rely=0.0, x=-6, y=5, anchor="ne")
+            prompt_box._snapgen_veo3_voice_controls = (frame, selected)
+
+        def refresh(slot_index):
+            if slot_index < len(g.get("slot_prompts") or []):
+                stored = getattr(g["slot_prompts"][slot_index], "_snapgen_veo3_voice_controls", None)
+                if stored:
+                    frame, _selected = stored
+                    if (g.get("_veo3_voice_state") or {}).get(slot_index, {}).get("enabled"):
+                        frame.place(relx=1.0, rely=0.0, x=-6, y=5, anchor="ne")
+                    else:
+                        frame.place_forget()
+
+        g["refresh_veo3_voice_controls"] = refresh
+        for index in range(len(g.get("slot_prompts") or [])):
+            refresh(index)
+
     def on_generate_slot(i):
         if g["slot_busy"][i]:
             g["append_log"](i, "generate ignored: slot busy")
             return
         img = g["slot_images"][i].get().strip()
         prompt = g["slot_prompts"][i].get("1.0", tk.END).strip()
+        voice_cfg = (g.get("_veo3_voice_state") or {}).get(i, {})
+        veo3_voice_dialogue = bool(voice_cfg.get("enabled"))
         # Enforce the checkbox at final video submission, not only while GPT
         # drafts a prompt. This also covers hand-written or later-edited prompts.
         no_turn_back_vars = g.get("video_no_turn_back_vars") or []
         no_turn_back = bool(no_turn_back_vars[i].get()) if i < len(no_turn_back_vars) else False
-        if no_turn_back:
+        if no_turn_back and not veo3_voice_dialogue:
             no_turn_rule = (
                 "คำสั่งบังคับเด็ดขาดสำหรับวิดีโอนี้: ตัวละครที่หันหลังในเฟรมเริ่มต้นต้องคงหันหลังตลอดคลิป "
                 "ห้ามหันศีรษะ ห้ามหันใบหน้า ห้ามเหลียวกลับมาหากล้อง ห้ามหมุนลำตัวจนเห็นใบหน้า "
@@ -3944,11 +4221,15 @@ def _install_actual_video_credit():
             )
             if "คำสั่งบังคับเด็ดขาดสำหรับวิดีโอนี้" not in prompt:
                 prompt = prompt.rstrip() + "\n\n" + no_turn_rule
-            g["append_log"](i, "ใช้คำสั่งห้ามหันหน้ากลับมาในงานวิดีโอจริง")
-        if not img:
+                g["append_log"](i, "ใช้คำสั่งห้ามหันหน้ากลับมาในงานวิดีโอจริง")
+        if veo3_voice_dialogue and prompt:
+            prompt = _veo3_voice_prompt(
+                str(voice_cfg.get("profile") or "เสียงกลาง"), prompt, _video_expression_for_slot(i)
+            )
+        if not img and not veo3_voice_dialogue:
             g["show_error"]("Error", f"Slot {i+1}: missing image")
             return
-        if not os.path.exists(img):
+        if img and not os.path.exists(img):
             g["show_error"]("Error", f"Slot {i+1}: image file not found")
             return
         if not prompt:
@@ -3956,20 +4237,42 @@ def _install_actual_video_credit():
             return
         _sanitize_video_slot_model(i, log_fn=lambda m: g["append_log"](i, m))
         cfg = g["slot_cfg_vars"][i]
-        sig = _video_cfg_signature(cfg)
         clear_slot_actual_if_config_changed(i)
         model_for_job = cfg["model"].get().strip()
+        # Camera movement is controlled by the Slot dropdown. Prompt splitters
+        # and GPT's image-to-video helper leave it unspecified; apply the
+        # selected policy only at the final submission boundary.
+        prompt = _video_camera_policy(prompt, cfg)
+        camera_name = str(cfg.get("camera_movement").get() or "อัตโนมัติ").strip()
+        if camera_name != "อัตโนมัติ":
+            g["append_log"](i, f"ใช้มุมกล้องจาก Slot: {camera_name}")
+        if model_for_job == GROK_LOWER_MODEL and str(cfg["duration"].get() or "").strip() not in GROK_LOWER_DURATIONS:
+            cfg["duration"].set(GROK_LOWER_DURATIONS[0])
+        # Build the credit key after any provider-specific normalization so
+        # the result remains attached to the exact settings that ran.
+        sig = _video_cfg_signature(cfg)
+        auto_aspect = str(cfg["aspect"].get() or "").strip() == VIDEO_AUTO_ASPECT
+        if auto_aspect:
+            cfg["aspect"].set(_resolve_video_aspect(
+                i,
+                img,
+                cfg,
+                log_fn=lambda message: g["append_log"](i, message),
+            ))
         g["slot_busy"][i] = True
         g["set_generate_enabled"](i, False)
-        if model_for_job == LTX23_LOCAL_MODEL:
+        if model_for_job == LTX23_CLOUD_MODEL:
+            g["set_slot_state"](i, "loading", "LTX-2.5 0%")
+            g["append_log"](i, "กำลังดาวน์โหลด/ตรวจโมเดล LTX-2.5 และเจนจริงด้วย GPU เครื่องนี้...")
+        elif model_for_job == LTX23_LOCAL_MODEL:
             g["set_slot_state"](i, "loading", "LTX-2.3 0% | กำลังเตรียม Local")
             g["append_log"](i, "กำลังเตรียม LTX-2.3 Local...")
+        elif model_for_job == LTX25_MAESTRO_MODEL:
+            g["set_slot_state"](i, "loading", "LTX-2.5 Fast VAE 0% | กำลังเตรียม Maestro")
+            g["append_log"](i, "กำลังเตรียม LTX-2.5 Distilled + Fast VAE ผ่าน Maestro...")
         elif model_for_job == MINIMAX_H3_LOCAL_MODEL:
             g["set_slot_state"](i, "loading", "MiniMax H3 0% | กำลังเตรียม Local")
             g["append_log"](i, "กำลังเตรียม MiniMax H3 Local...")
-        elif model_for_job == MINIMAX_CLOUD_MODEL:
-            g["set_slot_state"](i, "loading", "MiniMax Cloud 0% | กำลังเชื่อม Vast")
-            g["append_log"](i, "กำลังเตรียม MiniMax Cloud บน Vast...")
         else:
             g["set_slot_state"](i, "loading", "Submitting...")
             g["append_log"](i, "Submitting...")
@@ -3977,21 +4280,37 @@ def _install_actual_video_credit():
         def worker():
             before = None
             try:
-                if model_for_job in (MINIMAX_H3_LOCAL_MODEL, MINIMAX_CLOUD_MODEL, LTX23_LOCAL_MODEL):
+                if model_for_job in (
+                    MINIMAX_H3_LOCAL_MODEL,
+                    LTX23_LOCAL_MODEL,
+                    LTX25_MAESTRO_MODEL,
+                    LTX23_CLOUD_MODEL,
+                ):
                     if model_for_job == MINIMAX_H3_LOCAL_MODEL:
                         local_result = _generate_minimax_h3_local(i, img, prompt, cfg)
-                        saved_label = "Saved (Local + Post Process)"
-                    elif model_for_job == MINIMAX_CLOUD_MODEL:
-                        local_result = _generate_minimax_cloud(i, img, prompt, cfg)
-                        saved_label = "Saved (MiniMax Cloud + Post Process)"
-                    else:
+                        saved_text = "Saved (Local + Post Process)"
+                    elif model_for_job == LTX23_LOCAL_MODEL:
                         local_result = _generate_ltx23_local(i, img, prompt, cfg)
-                        saved_label = "Saved (Local + Post Process)"
+                        saved_text = "Saved (Local + Post Process)"
+                    elif model_for_job == LTX25_MAESTRO_MODEL:
+                        local_result = _generate_ltx23_local(i, img, prompt, cfg, ltx25=True)
+                        saved_text = "LTX-2.5 Fast VAE 100%"
+                    else:
+                        import snapgen_ltx_cloud
+                        def update_ltx25_progress(percent):
+                            value = max(0, min(100, int(percent)))
+                            _snapgen_after(0, lambda p=value: g["set_slot_state"](i, "loading", f"LTX-2.5 {p}%"))
+                        local_result = snapgen_ltx_cloud.generate(
+                            BASE, BASE_ROOT, g, i, img, prompt, cfg,
+                            rent_authorized=False,
+                            progress_fn=update_ltx25_progress,
+                        )
+                        saved_text = "LTX-2.5 100%"
                     if callable(g.get("_auto_slow2x_downloaded_video")):
                         local_result = g["_auto_slow2x_downloaded_video"](str(local_result), log_fn=lambda m: g["append_log"](i, m))
                     if callable(g.get("_auto_upscale_video_1080p")):
                         local_result = g["_auto_upscale_video_1080p"](str(local_result), log_fn=lambda m: g["append_log"](i, m))
-                    _snapgen_after(0, lambda label=saved_label: g["set_slot_state"](i, "ok", label))
+                    _snapgen_after(0, lambda text=saved_text: g["set_slot_state"](i, "ok", text))
                     _snapgen_after(0, g.get("play_download_complete_sound", lambda: None))
                     return
                 # Credit deltas are only reliable when one video job is measured at a time.
@@ -4003,39 +4322,55 @@ def _install_actual_video_credit():
                     except Exception as e:
                         g["append_log"](i, f"อ่านเครดิตก่อนสร้างไม่ได้: {e}")
 
+                _video_submit_context.aspect = (
+                    cfg["aspect"].get()
+                    if model_for_job in ("veo-2", "veo-3.1-lite")
+                    else ""
+                )
+                voice_files_before = set(Path(g.get("EXPORT_VIDEO") or EXPORT_VIDEO).glob("*.*")) if veo3_voice_dialogue else set()
+                try:
                     resp = g["generate_one"](i, img, prompt)
-                    g["append_log"](i, json.dumps(resp, ensure_ascii=False))
-                    uuid = g["extract_uuid"](resp)
-                    if not uuid:
-                        raise RuntimeError("No uuid in submit response")
-                    _video_prompt_names[str(uuid)] = prompt
-                    g["append_log"](i, "polling uuid: " + str(uuid))
-                    _current_video_slot[0] = i
-                    g["poll_and_download"](i, str(uuid), model_for_job)
+                finally:
+                    _video_submit_context.aspect = ""
+                    if auto_aspect:
+                        cfg["aspect"].set(VIDEO_AUTO_ASPECT)
+                g["append_log"](i, json.dumps(resp, ensure_ascii=False))
+                uuid = g["extract_uuid"](resp)
+                if not uuid:
+                    detail = json.dumps(resp, ensure_ascii=False)[:1000]
+                    raise RuntimeError(f"API ไม่คืน UUID — {detail}")
+                _video_prompt_names[str(uuid)] = prompt
+                g["append_log"](i, "polling uuid: " + str(uuid))
+                _current_video_slot[0] = i
+                g["poll_and_download"](i, str(uuid), model_for_job)
+                if veo3_voice_dialogue:
+                    _extract_veo3_voice_audio(i, voice_files_before)
 
-                    try:
-                        after = _fetch_credit_after_deduction(
-                            before,
-                            log_fn=lambda msg: g["append_log"](i, msg),
-                            attempts=12,
-                            delay=5,
-                         )
-                        if before is not None and after is not None:
-                            actual = max(0, before - after)
-                            if actual > 0:
-                                g["append_log"](i, f"เครดิตจริงที่หัก: {_fmt_credit(actual)} ({_fmt_credit(before)} → {_fmt_credit(after)})")
-                                credit_state, samples = _record_actual_video_credit_sample(i, sig, actual)
-                                sample_text = ", ".join(_fmt_credit(value) for value in samples)
-                                if credit_state == "confirmed":
-                                    g["append_log"](i, f"ยืนยันเครดิตจริงแล้ว: {_fmt_credit(actual)} (ตรงกัน 3 ครั้ง)")
-                                elif credit_state == "mismatch":
-                                    g["append_log"](i, f"เครดิตจริง 3 ครั้งไม่ตรงกัน [{sample_text}] — ยังใช้ค่าจริงเดิม")
-                                elif credit_state == "pending":
-                                    g["append_log"](i, f"กำลังเก็บเครดิตจริง {len(samples)}/3 [{sample_text}] — ยังไม่ยืนยันค่าใหม่")
-                            else:
-                                g["append_log"](i, f"เครดิตยังไม่เปลี่ยน: {_fmt_credit(before)} → {_fmt_credit(after)}")
-                    except Exception as e:
-                        g["append_log"](i, f"อ่านเครดิตหลังสร้างไม่ได้: {e}")
+                # Measure every hosted video after the provider finishes,
+                # including non-voice Veo, Grok Lower and Vela jobs.
+                try:
+                    after = _fetch_credit_after_deduction(
+                        before,
+                        log_fn=lambda msg: g["append_log"](i, msg),
+                        attempts=12,
+                        delay=5,
+                    )
+                    if before is not None and after is not None:
+                        actual = max(0, before - after)
+                        if actual > 0:
+                            g["append_log"](i, f"เครดิตจริงที่หัก: {_fmt_credit(actual)} ({_fmt_credit(before)} → {_fmt_credit(after)})")
+                            credit_state, samples = _record_actual_video_credit_sample(i, sig, actual)
+                            sample_text = ", ".join(_fmt_credit(value) for value in samples)
+                            if credit_state == "confirmed":
+                                g["append_log"](i, f"ยืนยันเครดิตจริงแล้ว: {_fmt_credit(actual)} (ตรงกัน 3 ครั้ง)")
+                            elif credit_state == "mismatch":
+                                g["append_log"](i, f"เครดิตจริง 3 ครั้งไม่ตรงกัน [{sample_text}] — แสดงค่าที่วัดได้ล่าสุด")
+                            elif credit_state == "pending":
+                                g["append_log"](i, f"แสดงเครดิตจริงแล้ว กำลังตรวจซ้ำ {len(samples)}/3 [{sample_text}]")
+                        else:
+                            g["append_log"](i, f"เครดิตยังไม่เปลี่ยน: {_fmt_credit(before)} → {_fmt_credit(after)}")
+                except Exception as e:
+                    g["append_log"](i, f"อ่านเครดิตหลังสร้างไม่ได้: {e}")
 
                 _snapgen_after(0, lambda: (g["set_slot_state"](i, "ok", "Saved"), _refresh_all_actual_slot_cfg_labels()))
                 _snapgen_after(0, g.get("play_download_complete_sound", lambda: None))
@@ -4064,10 +4399,60 @@ def _install_actual_video_credit():
         threading.Thread(target=worker, daemon=True).start()
 
     g["on_generate_slot"] = on_generate_slot
+    root.after(250, _install_veo3_voice_controls)
     sanitize_all_video_models()
     bind_credit_cfg_watchers()
     _refresh_all_actual_slot_cfg_labels()
 
+def _install_local_video_slot_persistence():
+    """Install Local model menus and Slot saving without SnapGen API dependencies."""
+    configs = g.get("slot_cfg_vars") or []
+
+    def sync_local_video_menus():
+        for idx in range(len(g.get("slot_cfg_vars") or [])):
+            _add_minimax_h3_to_model_menu(idx)
+
+    for idx, cfg in enumerate(configs):
+        for key in ("model", "resolution", "duration", "aspect", "mode"):
+            var = cfg.get(key) if isinstance(cfg, dict) else None
+            if not hasattr(var, "trace_add") or getattr(var, "_snapgen_slot_persistence_watch", False):
+                continue
+
+            def _persist_slot_setting(*_args, i=idx, changed_key=key):
+                try:
+                    save_fn = g.get("save_slot_configs")
+                    if callable(save_fn):
+                        save_fn()
+                except Exception as exc:
+                    print(f"[SnapGen] save video Slot config failed: {exc}", flush=True)
+                if changed_key == "model":
+                    try:
+                        root.after_idle(lambda slot=i: (
+                            _add_minimax_h3_to_model_menu(slot),
+                            g["refresh_slot_duration_menu"](slot),
+                        ))
+                    except Exception:
+                        _add_minimax_h3_to_model_menu(i)
+                        g["refresh_slot_duration_menu"](i)
+
+            var.trace_add("write", _persist_slot_setting)
+            try:
+                var._snapgen_slot_persistence_watch = True
+            except Exception:
+                pass
+
+    # This installer is intentionally independent from actual-credit support.
+    # Local-only installations may not expose fetch_available_credit or the
+    # hosted generate functions, but their menus and persistence must work.
+    sync_local_video_menus()
+    try:
+        root.after(100, sync_local_video_menus)
+        root.after(500, sync_local_video_menus)
+        root.after(1500, sync_local_video_menus)
+    except Exception:
+        pass
+
+_install_local_video_slot_persistence()
 _install_actual_video_credit()
 
 # ── Video dialogue controls inside each Video prompt ────────────────────
@@ -4336,29 +4721,10 @@ def _video_expression_slot_snapshot(index):
 
 
 def _reset_video_camera_for_new_slot_content(index):
-    """A manual camera movement belongs only to the current image/prompt pair."""
-    try:
-        configs = g.get("slot_cfg_vars") or []
-        if index >= len(configs):
-            return
-        cfg = configs[index]
-        camera_var = cfg.get("camera_movement") if isinstance(cfg, dict) else None
-        if not hasattr(camera_var, "get") or not hasattr(camera_var, "set"):
-            return
-        if str(camera_var.get() or "").strip() == "อัตโนมัติ":
-            return
-        camera_var.set("อัตโนมัติ")
-        save_fn = g.get("save_slot_configs")
-        if callable(save_fn):
-            save_fn()
-        refresh_fn = g.get("refresh_slot_cfg_label")
-        if callable(refresh_fn):
-            refresh_fn(index)
-        logger = g.get("append_log")
-        if callable(logger):
-            logger(index, "มุมกล้องรีเซ็ตอัตโนมัติ: อัตโนมัติ (รูปหรือ Prompt เปลี่ยน)")
-    except Exception as exc:
-        print(f"[SnapGen] auto-reset video camera failed: {exc}", flush=True)
+    """Keep the user's camera choice when the Slot image or prompt changes."""
+    # Camera is an independent Slot setting. The old reset to "อัตโนมัติ"
+    # silently discarded a manual choice before generation.
+    return
 
 
 def _reset_video_expression_for_new_slot_content(index):
@@ -4467,7 +4833,7 @@ def _install_video_expression_controls():
         controls.place(relx=0.0, rely=1.0, x=6, y=-5, anchor="sw")
         tk.Label(
             controls,
-            text="สีหน้า",
+            text="อารมณ์การพูด",
             bg="#FAFAF7",
             fg="#B8BEC7",
             padx=2,
@@ -4530,6 +4896,8 @@ def _video_expression_for_slot(index):
 
 
 def _apply_video_expression_to_prompt(index, prompt):
+    if (g.get("_veo3_voice_state") or {}).get(index, {}).get("enabled"):
+        return str(prompt)
     selected = _video_expression_for_slot(index)
     instruction = VIDEO_EXPRESSION_PRESETS.get(selected, "")
     if not instruction or "Facial expression control:" in str(prompt):
@@ -4543,15 +4911,58 @@ def _install_video_expression_prompt_wrapper():
         return
 
     def generate_one_with_expression(index, image, prompt, *args, **kwargs):
+        voice_cfg = (g.get("_veo3_voice_state") or {}).get(index, {})
+        voice_mode = bool(voice_cfg.get("enabled"))
         selected = _video_expression_for_slot(index)
-        final_prompt = _apply_video_expression_to_prompt(index, prompt)
-        if selected != "ตาม Prompt":
+        final_prompt = prompt if voice_mode else _apply_video_expression_to_prompt(index, prompt)
+        if not voice_mode and selected != "ตาม Prompt":
             logger = g.get("append_log")
             if callable(logger):
                 try:
                     logger(int(index), f"ใช้สีหน้า: {selected}")
                 except Exception:
                     pass
+        if not voice_mode and str(g["slot_cfg_vars"][index]["model"].get() or "").strip() == VELA_VIDEO_MODEL:
+            cfg = g["slot_cfg_vars"][index]
+            return g["run_json"](_build_vela_video_command(
+                g["api_key_var"].get(),
+                final_prompt,
+                image,
+                cfg["duration"].get(),
+                cfg["aspect"].get(),
+            ))
+        if voice_mode:
+            placeholder = ""
+            submission_image = str(image or "").strip()
+            if not submission_image:
+                handle, placeholder = tempfile.mkstemp(prefix="snapgen-veo3-voice-", suffix=".png")
+                os.close(handle)
+                from PIL import Image
+                Image.new("RGB", (1280, 720), "black").save(placeholder)
+                submission_image = placeholder
+            cfg = g["slot_cfg_vars"][index]
+            profile = str(voice_cfg.get("profile") or "เสียงกลาง")
+            command = [
+                "curl", "-s", "-X", "POST", g["API_URL"],
+                "-H", "x-api-key: " + g["api_key_var"].get().strip(),
+                "-H", "Content-Type: multipart/form-data",
+                "--form", "prompt=" + final_prompt,
+                "--form", "model=veo-3.1-lite",
+                "--form", "resolution=" + cfg["resolution"].get().strip(),
+                "--form", "duration=" + cfg["duration"].get().strip(),
+                "--form", "aspect_ratio=" + cfg["aspect"].get().strip(),
+                "--form", "mode_image=frame",
+                "--form", "voice_media_id=" + (g.get("_veo3_voice_media_ids") or {}).get(profile, "pulcherrima"),
+                "--form", "ref_images=@" + submission_image,
+            ]
+            try:
+                return g["run_json"](command)
+            finally:
+                if placeholder:
+                    try:
+                        os.unlink(placeholder)
+                    except OSError:
+                        pass
         return original(index, image, final_prompt, *args, **kwargs)
 
     generate_one_with_expression._video_expression_wrapper = True
@@ -4569,6 +4980,20 @@ _install_video_expression_auto_reset()
 # The recovered buttons are removed, then our cross-machine repair tool is
 # added.  It must never assume this developer PC's paths or installed tools.
 _orig_settings_open = None
+
+def _inject_ltx_cloud_settings(settings_win):
+    """Attach the isolated Vast/ComfyUI control without touching Storyboard."""
+    try:
+        import snapgen_ltx_cloud
+        snapgen_ltx_cloud.inject_settings(
+            settings_win,
+            root=root,
+            base=BASE,
+            ui_font=SNAPGEN_UI_FONT,
+        )
+    except Exception as cloud_error:
+        print(f"[SnapGen] LTX Cloud settings error: {cloud_error!r}")
+
 
 def _wrap_open_settings():
     global _orig_settings_open
@@ -4591,6 +5016,7 @@ def _wrap_open_settings():
                         _remove_openrouter_settings(w)
                         _add_settings_maintenance_buttons(w)
                         _rewire_snapgen_api_test_button(w)
+                        _inject_ltx_cloud_settings(w)
                         w.after(30, _rewire_open_settings_windows)
                         w.after(150, _rewire_open_settings_windows)
                         try:
@@ -4689,6 +5115,7 @@ def _rewire_open_settings_windows():
                 if "Settings" in title or "ตั้งค่า" in title:
                     _remove_openrouter_settings(w)
                     _rewire_snapgen_api_test_button(w)
+                    _inject_ltx_cloud_settings(w)
     except Exception:
         pass
 
@@ -4740,7 +5167,7 @@ def _clear_export_contents():
 # accounts, Chrome profiles, settings, or other user/runtime data.
 #
 # Do not add a second Restore button or revive the removed local ZIP Restore.
-# Full map: docs/PROGRAM_ARCHITECTURE_NOTES.md
+# Full map: กฏของโปรแกรม/PROGRAM_ARCHITECTURE_NOTES.md
 # ===========================================================================
 _update_check_running = [False]
 _update_status_waiters = []
@@ -5184,7 +5611,6 @@ def _add_settings_maintenance_buttons(settings_win):
         seen_update = False
         seen_publish = False
         seen_account_hub = False
-        seen_cloud_accounts = False
 
         def hide_clipped_ready_status(w):
             """Remove the obsolete one-character 'พ'/'พร้อม' Settings status."""
@@ -5213,7 +5639,7 @@ def _add_settings_maintenance_buttons(settings_win):
         hide_clipped_ready_status(settings_win)
 
         def scan(w):
-            nonlocal seen_repair, seen_restore, seen_clear, seen_update, seen_publish, seen_account_hub, seen_cloud_accounts
+            nonlocal seen_repair, seen_restore, seen_clear, seen_update, seen_publish, seen_account_hub
             if isinstance(w, tk.Button):
                 text = str(w.cget("text"))
                 # Remove legacy local Backup button from older builds.
@@ -5235,14 +5661,12 @@ def _add_settings_maintenance_buttons(settings_win):
                     seen_publish = True
                 if text in {"จับ Account", "Account Capture", "Accounts"} or "จับ Account" in text:
                     seen_account_hub = True
-                if text == "Cloud Accounts" or "Cloud Account" in text:
-                    seen_cloud_accounts = True
             for c in list(w.winfo_children()):
                 scan(c)
         scan(settings_win)
         publisher_available = (BASE_ROOT / "tools" / "publish_update.ps1").is_file() and _publisher_machine_allowed()
         tools_already_present = bool(
-            seen_repair and seen_restore and seen_clear and seen_update and seen_account_hub and seen_cloud_accounts and (seen_publish or not publisher_available)
+            seen_repair and seen_restore and seen_clear and seen_update and seen_account_hub and (seen_publish or not publisher_available)
         )
         target = None
         def find_bridge_parent(w):
@@ -5859,6 +6283,111 @@ def _add_settings_maintenance_buttons(settings_win):
         close_row = getattr(close_button, "master", None)
         settings_stack = getattr(close_row, "master", None) if close_row is not None else None
         voice_host = settings_stack or status_host or parent
+
+        mobile_box = tk.LabelFrame(
+            voice_host,
+            text="📱 ลิงก์มือถือของเครื่องนี้",
+            padx=8,
+            pady=6,
+            fg="#111",
+        )
+        mobile_box._snapgen_voice_settings_row = True
+        mobile_url_var = tk.StringVar(value="กำลังสร้างลิงก์ Tailscale ของเครื่องนี้...")
+        mobile_status_var = tk.StringVar(value="กำลังตรวจ Tailscale Funnel...")
+        mobile_url_row = tk.Frame(mobile_box)
+        mobile_url_row.pack(fill="x")
+        mobile_url_entry = ttk.Entry(
+            mobile_url_row,
+            textvariable=mobile_url_var,
+            state="readonly",
+            font=(SNAPGEN_UI_FONT, 9),
+        )
+        mobile_url_entry.pack(side="left", fill="x", expand=True)
+
+        def _current_mobile_url():
+            getter = g.get("get_mobile_web_link")
+            if not callable(getter):
+                return ""
+            try:
+                return str((getter() or {}).get("url") or "").strip()
+            except Exception:
+                return ""
+
+        def _copy_mobile_url():
+            url = _current_mobile_url()
+            if not url:
+                status.set("ลิงก์มือถือยังไม่พร้อม")
+                return
+            root.clipboard_clear()
+            root.clipboard_append(url)
+            root.update_idletasks()
+            status.set("คัดลอกลิงก์มือถือของเครื่องนี้แล้ว")
+
+        def _open_mobile_url():
+            url = _current_mobile_url()
+            if not url:
+                status.set("ลิงก์มือถือยังไม่พร้อม")
+                return
+            import webbrowser
+            webbrowser.open(url)
+
+        copy_mobile_button = tk.Button(
+            mobile_url_row,
+            text="คัดลอกลิงก์",
+            command=_copy_mobile_url,
+            bg="#2563EB",
+            fg="white",
+            state="disabled",
+        )
+        copy_mobile_button.pack(side="left", padx=(6, 0))
+        open_mobile_button = tk.Button(
+            mobile_url_row,
+            text="เปิดลิงก์",
+            command=_open_mobile_url,
+            bg="#059669",
+            fg="white",
+            state="disabled",
+        )
+        open_mobile_button.pack(side="left", padx=(6, 0))
+        mobile_status_label = tk.Label(
+            mobile_box,
+            textvariable=mobile_status_var,
+            fg="#6B7280",
+            anchor="w",
+            justify="left",
+            font=(SNAPGEN_UI_FONT, 8),
+        )
+        mobile_status_label.pack(fill="x", pady=(5, 0))
+
+        def _refresh_mobile_link():
+            try:
+                if not mobile_box.winfo_exists():
+                    return
+                getter = g.get("get_mobile_web_link")
+                data = getter() if callable(getter) else {}
+                url = str((data or {}).get("url") or "").strip()
+                message = str((data or {}).get("status") or "เว็บมือถือยังไม่เริ่มทำงาน")
+                error = str((data or {}).get("error") or "").strip()
+                mobile_url_var.set(url or "กำลังสร้างลิงก์ Tailscale ของเครื่องนี้...")
+                mobile_status_var.set("● " + message + ((" — " + error) if error else ""))
+                mobile_status_label.config(
+                    fg=("#059669" if url and data.get("public") else "#D97706" if url else "#DC2626")
+                )
+                button_state = "normal" if url else "disabled"
+                copy_mobile_button.config(state=button_state)
+                open_mobile_button.config(state=button_state)
+                settings_win.after(1000, _refresh_mobile_link)
+            except Exception:
+                pass
+
+        if settings_stack is not None and close_row is not None and str(close_row.winfo_manager() or "") == "pack":
+            mobile_box.pack(fill="x", padx=10, pady=(8, 4), before=close_row)
+        elif parent_manager == "pack" and status_host is not None:
+            mobile_box.pack(fill="x", padx=10, pady=(8, 2), after=parent)
+        else:
+            mobile_box.pack(fill="x", padx=8, pady=(5, 2))
+        _refresh_mobile_link()
+
         voice_box = tk.LabelFrame(voice_host, text="🎙 ถอดเสียงเป็นข้อความ", padx=8, pady=5, fg="#111")
         voice_box._snapgen_voice_settings_row = True
         voice_model_labels = {"large-v3": "Large v3 — แม่นสุด"}
@@ -6064,7 +6593,11 @@ def _add_settings_maintenance_buttons(settings_win):
                     import snapgen_3d_model_manager as manager
                     details = []
                     for item in manager.list_models():
-                        state = f"ติดตั้งแล้ว {_format_model_size(item['bytes'])}" if item["installed"] else "ยังไม่ติดตั้ง"
+                        state = (
+                            f"ติดตั้งแล้ว {_format_model_size(item['bytes'])}"
+                            if item["installed"]
+                            else "ยังไม่ติดตั้ง — กดสร้าง 3D เพื่อโหลดอัตโนมัติ"
+                        )
                         details.append(f"{item['name']}: {state}")
                     text = " • ".join(details)
                 except Exception as exc:
@@ -6913,7 +7446,7 @@ def _run_codex_prompt_refs(story_text, story_bible="", full_story=""):
     task = (
         "คุณคือผู้กำกับภาพยนตร์สืบสวน-ดราม่าระดับฟอร์มยักษ์, Director of Photography, และ storyboard artist สำหรับ SnapGen.\n"
         "งานนี้ต้องสร้าง Prompt-Ref ภาษาไทยที่คนไทยอ่านเข้าใจ ใช้ต่อกับรูปอ้างอิง/ไฟล์แนบชื่อไทยได้จริง.\n"
-        "ตอบเป็นภาษาไทยทั้งหมด ยกเว้นศัพท์กล้องมาตรฐานที่จำเป็น เช่น Wide Shot, slow push-in, shallow depth of field.\n"
+        "ตอบเป็นภาษาไทยทั้งหมด ยกเว้นศัพท์ภาพยนตร์มาตรฐานที่จำเป็น เช่น Wide Shot, shallow depth of field.\n"
         "\n"
         "=== วิธีทำงาน ===\n"
         "คุณจะได้รับ 3 ส่วน:\n"
@@ -6942,7 +7475,7 @@ def _run_codex_prompt_refs(story_text, story_bible="", full_story=""):
         "ห้ามเขียน prompt สั้นๆ แค่ 1-2 บรรทัด — แต่ละ prompt ต้องบรรยายภาพแบบ full shot description ที่ครอบคลุม:\n"
         "  - เหตุการณ์ที่กำลังเกิดขึ้น (ก่อนอื่น)\n"
         "  - Shot type (Wide, Medium, Close-up, Over-the-shoulder, POV, etc.)\n"
-        "  - Camera movement (slow push-in, static, pan, dolly, handheld, etc.)\n"
+        "  - ห้ามกำหนดการเคลื่อนกล้องใน Prompt วิดีโอ เพราะเมนู กล้อง ของ Slot จะเป็นผู้กำหนดตอนสร้างจริง\n"
         "  - Lens/perspective (eye-level, low angle, high angle, shallow depth of field, deep focus, etc.)\n"
         "  - Composition: foreground, midground, background — แต่ละชั้นบอกว่ามีอะไร\n"
         "  - ตัวละครที่ปรากฏ: ชื่อ, ตำแหน่งในเฟรม, action/body language, สีหน้า/อารมณ์\n"
@@ -6961,7 +7494,7 @@ def _run_codex_prompt_refs(story_text, story_bible="", full_story=""):
         "4. แต่ละ prompt ต้องขึ้นต้นด้วยชื่อช็อต + ชื่อตัวละคร/สถานที่/วัตถุอ้างอิงจาก SYSTEM CONTEXT หรือ CURRENT SCENE ที่ต้องใช้แนบรูป.\n"
         "5. ห้ามกำหนดลักษณะภาพตัวละครเอง — อายุ สีผิว ทรงผม เสื้อผ้า ลักษณะเด่น ฯลฯ จะมาจากรูปอ้างอิงที่ผู้ใช้แนบเท่านั้น. ระบุเฉพาะชื่อตัวละครและบทบาท/อารมณ์ ที่บทกำหนด. ห้ามเขียนว่า ผิวคล้ำ ผมสั้น เสื้อสีนี้ ฯลฯ เพราะจะขัดกับรูปที่แนบ.\n"
         "6. ทุก prompt ต้องเริ่มด้วยการบอกว่าเหตุการณ์อะไรกำลังเกิดขึ้นใน shot นั้น ก่อนจะบรรยายภาพ — เพื่อให้ตรวจสอบได้ว่าตรงกับบทจริง.\n"
-        "7. ทุก prompt ต้องมี shot type, slow camera movement, lens/perspective, foreground-midground-background, สีหน้า/body language, อารมณ์, key props/animals/objects, lighting, muted Thai investigation-drama tone.\n"
+        "7. ทุก prompt ต้องมี shot type, lens/perspective, foreground-midground-background, สีหน้า/body language, อารมณ์, key props/animals/objects, lighting, muted Thai investigation-drama tone. ห้ามเขียน camera movement, zoom, push-in, pull-out, pan, tilt, dolly, tracking หรือ handheld ลงใน Prompt วิดีโอ เพราะให้เมนู กล้อง ของ Slot ควบคุมเอง\n"
         "8. ตัวละครหลัก (HERO) ต้องอยู่กลางเฟรมหรือเด่นชัดที่สุดในช็อตที่ปรากฏ — ตัวประกอบต้องอยู่ชั้นหลัง/ข้าง/เบลอ ไม่ใช่ยืนเสมอกัน.\n"
         "9. ทุก prompt ต้องเป็น prompt ที่เอาไปเจนรูปหรือเจนวิดีโอได้ทันที: ภาพต้องชัด วัตถุหลักต้องไม่ถูกบัง การกระทำต้องเห็นได้จริง ไม่ใช่คำเล่าเรื่องลอยๆ.\n"
         "10. ถ้าตัวละคร/สัตว์/พร็อพมีจุดจำเพาะสำคัญ เช่น ช้างงาขาด แผลเป็น ของหาย อาวุธ รอยเชือก ต้องเขียนจุดนั้นซ้ำทุก prompt ที่ตัวนั้นปรากฏ และกำกับว่าเห็นชัด ไม่ถูกคน/ฉากหน้า/เงาบัง.\n"
@@ -6970,7 +7503,7 @@ def _run_codex_prompt_refs(story_text, story_bible="", full_story=""):
         "13. ห้ามทำให้ผู้ต้องสงสัยดูผิดแน่ถ้าบทยังแค่สงสัย. ห้าม markdown ห้าม bullet ห้ามคำอธิบายเพิ่ม.\n"
         "14. รูปแบบ: 1 prompt = 1 ย่อหน้า แยกด้วยบรรทัดว่าง รวมสุดท้ายต้องเหลือ 11 ย่อหน้าเท่านั้น.\n"
         "15. สำคัญมาก: แต่ละ prompt ต้องยาวและละเอียด — แต่ละ prompt ต้องเป็น 1 ภาพที่สมบูรณ์ในตัวเอง ไม่ใช่ fragment สั้นๆ ที่ตัดไปตัดมา. นึกภาพว่าผู้กำกับส่ง shot description นี้ให้ DOP แล้ว DOP ถ่ายได้เลยโดยไม่ต้องถามอะไรเพิ่ม.\n"
-        "16. ห้ามเขียน prompt สั้นแค่ 1-2 บรรทัด — แต่ละ prompt ต้องบรรยายภาพแบบ full shot description ที่ครอบคลุม shot type, camera movement, lens/perspective, composition (foreground/midground/background), ตัวละครที่ปรากฏและตำแหน่งในเฟรม, body language, สีหน้า/อารมณ์, key props/animals, lighting, atmosphere/tone, จุดจำเพาะที่ต้องเห็นชัด.\n"
+        "16. ห้ามเขียน prompt สั้นแค่ 1-2 บรรทัด — แต่ละ prompt ต้องบรรยายภาพแบบ full shot description ที่ครอบคลุม shot type, lens/perspective, composition (foreground/midground/background), ตัวละครที่ปรากฏและตำแหน่งในเฟรม, body language, สีหน้า/อารมณ์, key props/animals, lighting, atmosphere/tone, จุดจำเพาะที่ต้องเห็นชัด และเว้นการกำหนด camera movement ให้โปรแกรมเลือกเอง\n"
         "17. แต่ละ prompt ควรยาว 4-8 บรรทัดเพื่อให้เอาไปเจนรูปหรือเจนวิดีโอได้ทันทีโดยไม่ต้องเติมอะไรเพิ่ม.\n"
         "\n"
     )
@@ -7224,7 +7757,7 @@ def _summarize_story_for_prompt_refs(story_text, story_bible=""):
     payload_file = os.path.join(tempfile.gettempdir(), "snapgen_gpt_story_summary.json")
     try:
         with open(payload_file, "w", encoding="utf-8") as f:
-            json.dump({"model": "gpt-4o-mini", "chatgpt_image_intercept": False, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]}, f, ensure_ascii=False)
+            json.dump({"model": "auto", "chatgpt_image_intercept": False, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]}, f, ensure_ascii=False)
         data = _run_json([
             "curl", "--max-time", "600", "-s", _chatgpt_api_base() + "/chat/completions",
             "-H", "Authorization: Bearer local-dev-key",
@@ -7474,14 +8007,6 @@ def _prompt_ref_context_history_ready(story=None):
         )
     )
     if marked_ready:
-        context_file = BASE / "prompt_ref_context.json"
-        try:
-            current_context = json.loads(context_file.read_text(encoding="utf-8-sig"))
-            normalized_context = _normalize_prompt_ref_breakdown(current_context)
-            if _prompt_ref_visual_bible_incomplete(normalized_context):
-                return False
-        except Exception:
-            return False
         return True
     # Migrate only a pre-patch history that already proves its Storyboard was
     # created inside this exact conversation. A local JSON file alone is not
@@ -7504,12 +8029,6 @@ def _prompt_ref_context_history_ready(story=None):
         and story_hash
         and legacy_same_conversation
     ):
-        try:
-            legacy_context = _normalize_prompt_ref_breakdown(json.loads(context_file.read_text(encoding="utf-8-sig")))
-            if _prompt_ref_visual_bible_incomplete(legacy_context):
-                return False
-        except Exception:
-            return False
         _mark_prompt_ref_context_ready(legacy_before.get("parent_message_id"))
         return True
     return False
@@ -7559,7 +8078,7 @@ def _rebuild_prompt_ref_bridge_once():
             if _bridge_health():
                 # Health alone is insufficient: prove normal-chat itself.
                 errors = []
-                for model in ("auto", "gpt-4o-mini"):
+                for model in ("auto",):
                     try:
                         probe = _prompt_ref_chat(
                             [{"role": "user", "content": "ตอบ BRIDGE_OK เท่านั้น"}],
@@ -7734,232 +8253,6 @@ def _ingest_prompt_ref_story(full_story, source_file="auto"):
     return reply
 
 
-def _prompt_ref_context_quality_rules():
-    """Authoritative semantic + reference-ready visual-bible policy."""
-    return (
-        "วิเคราะห์บทเป็น STORY BREAKDOWN ก่อนคิดเรื่อง prompt ภาพ. แยกสิ่งที่บทพูดถึงตามตัวตนจริง ห้ามใช้ keyword เดา. "
-        "1) main_characters = มนุษย์ตัวหลักที่เรื่องติดตาม/มีผลต่อเหตุการณ์หลัก. supporting_characters = มนุษย์ตัวรองที่มีบทบาทจริง. "
-        "2) animals = สัตว์หรือกลุ่มสัตว์ที่ต้องจำแนกเป็น entity ของตัวเอง. ห้ามเอาสัตว์ไปรวมกับคนหรือ props. "
-        "3) supernatural_entities = ผี วิญญาณ สิ่งเหนือธรรมชาติ หรือสิ่งลึกลับที่บททำให้ต้องเห็นเป็น entity แยก. "
-        "ถ้าบทยังไม่ยืนยันชนิด ให้ใช้ entity_type=supernatural_unknown และ certainty=ambiguous/suspected; ห้ามฟันธงเกินบท. "
-        "4) locations = สถานที่ที่เหตุการณ์เกิดหรือจำเป็นต่อ continuity. props = วัตถุที่ต้องเห็น/มีผลต่อเหตุการณ์; ไม่รวมคน สัตว์ หรือสิ่งเหนือธรรมชาติ. "
-        "5) entity_type เป็นข้อสรุปของตัว entity เอง ไม่ใช่สิ่งที่มันพบเห็น. คนที่เห็นผี พูดเรื่องผี กลัวผี หรือเสียชีวิตภายหลังยังเป็น human "
-        "เว้นแต่บทบอกชัดว่าบุคคลนั้นกลับมาปรากฏเป็นผี. "
-        "6) แยก identity ถาวรจาก temporary_states เช่น หลับ ป่วย ผอมลง บาดเจ็บ ตาย กลัว ถูกสิง เปียก เลอะ หรือสภาพเฉพาะฉาก. "
-        "temporary_states ห้ามถูกย้ายไปเป็น visual_identity ถาวร. "
-        "7) needs_ref=true เฉพาะ entity/location/prop ที่ควรมีภาพอ้างอิงจริง: เป็นตัวหลัก, ปรากฏซ้ำ, ต้องรักษาหน้าตา/รูปทรงข้ามฉาก, "
-        "หรือมีบทบาทภาพสำคัญ. ตัวที่กล่าวผ่าน ๆ และไม่ต้องเห็นให้ needs_ref=false. "
-        "8) ถ้าไม่มีชื่อเฉพาะ ใช้คำเรียกที่บทใช้และจำแนกได้ เช่น พี่ชาย, ลุงของแม่, เจ้าแมวส้มอ้วน, แมวสามสีบนกำแพง, สิ่งคล้ายคนคลานสี่ขา. ห้ามประดิษฐ์ชื่อใหม่. "
-        "9) ทุก entity ต้องมี evidence สั้น ๆ เฉพาะสิ่งที่บทสนับสนุนจริง และ assumptions แยกต่างหากสำหรับรายละเอียดที่สมมุติ. "
-        "10) ก่อนตอบให้ตรวจ coverage เทียบทั้งเรื่อง: ใครคือแกนเรื่อง ใครเป็นตัวรอง สัตว์สำคัญคืออะไร สิ่งเหนือธรรมชาติมีอะไร สถานที่และวัตถุใดต้องใช้จริง. "
-        "11) VISUAL BIBLE LOCK: ทุก human ที่ needs_ref=true ต้องพร้อมใช้สร้าง Ref โดยมี อายุ, เพศ, รูปร่าง, ส่วนสูง, สีผิว, ทรงผม, ใบหน้า, ดวงตา, เสื้อผ้า, ลักษณะเด่น และ visual_identity ที่เฉพาะเจาะจง. "
-        "ห้ามใช้ค่าว่าง, 'ไม่ระบุ', หรือคำกว้าง ๆ เช่น 'ชายไทยทั่วไป'/'หญิงไทยทั่วไป' เป็นคำตอบสุดท้าย. ถ้าบทไม่บอก แต่รายละเอียดนั้นจำเป็นต่อภาพ ให้เลือกสมมุติฐานที่สมเหตุผลจากยุค สถานที่ บทบาท อาชีพ ฐานะ ครอบครัว สภาพอากาศ และเหตุการณ์หลัก แล้วลงท้าย field นั้นด้วย '(สมมุติเพื่อภาพ)'. "
-        "12) visual_identity ต้องเป็นสรุปภาพจำถาวรของ entity แบบเฉพาะเจาะจง รวมช่วงวัย รูปร่าง สีผิว ผม โครงหน้า ดวงตา และจุดจำ; ห้ามใส่อารมณ์หรือสภาพชั่วคราว. "
-        "13) COSTUME DESIGNER RULE — เสื้อผ้าของ human character แต่ละคนต้องสะท้อน identity เฉพาะตัว ไม่ใช่ template เดียวกัน: "
-        "คิดเหมือน costume designer ภาพยนตร์ — ก่อนระบุเสื้อผ้าใคร ให้พิจารณา อายุ เพศ อาชีพ ฐานะ บุคลิก บทบาทในเรื่อง วิถีชีวิต สถานที่ วัฒนธรรม ยุค และ activity ที่ตัวละครทำในเรื่อง. "
-        "เลือกชุดหลักชุดเดียว แล้วระบุ: สีจริง (ไม่ใช่ 'สีหม่น'/'เป็นกลาง' ที่ไม่บอกอะไร) วัสดุจริง ทรงจริง. "
-        "ห้ามตอบ 'เสื้อผ้าที่เหมาะกับ...' หรือ 'เสื้อผ้าตามยุค...' ต้องตัดสินใจเลือกมาเลย เช่น 'เสื้อเชิ้ตสีขาวนวลแขนยาว' ไม่ใช่ 'เสื้อสีอ่อนเหมาะกับตัวละคร'. "
-        "ถ้าสมมุติให้ลงท้าย '(สมมุติเพื่อภาพ)'. ห้ามใช้ยูนิฟอร์มจากอาชีพถ้าเรื่องไม่ได้วางตัวละครในสถานการณ์นั้น. "
-        "14) CROSS-CHARACTER DIFFERENTIATION — หลังออกแบบเสื้อผ้าทุกคนแล้วให้เปรียบเทียบ human characters ทั้งหมดพร้อมกัน: "
-        "ตัวละครหลัก 2 คนห้ามมี top แบบเดียวกัน, silhouette เดียวกัน, หรือ palette family เดียวกันทั้งหมด. "
-        "ห้ามทุกคนใช้ grey/brown/muted neutral เพราะ global mood — visual_rules ควบคุม cinematography ได้ แต่ห้าม normalize เสื้อผ้าทุกคนให้สีเหมือนกัน. "
-        "แต่ละตัวละครต้องจำแนกกันได้จาก full-body shot แม้ไม่เห็นหน้า. "
-        "15) COSTUME_IDENTITY — สำหรับ human ที่ needs_ref=true ให้เพิ่ม costume_identity object: "
-        "{\"signature_palette\":[\"สี1\",\"สี2\"], \"signature_silhouette\":\"ทรงเสื้อ+กางเกง\", \"signature_material_or_texture\":\"วัสดุหลัก\", \"recognition_cue\":\"จุดที่จำได้ทันทีจาก full-body shot\", \"avoid_overlap_with\":[\"character_id ที่ห้ามซ้ำ\"]}. "
-        "recognition_cue ต้องเป็น visual marker เฉพาะตัวที่ดูรู้ได้ทันที ห้ามซ้ำกันระหว่างตัวละคร. "
-        "animal/supernatural ที่ไม่มีเสื้อผ้าให้ costume_identity=null. "
-        "16) สำหรับ animal/supernatural ที่ needs_ref=true visual_identity ต้องระบุรูปร่าง สี/ลาย ผิวหรือขน สัดส่วน และจุดจำที่พอรักษา continuity ได้; รายละเอียดที่บทไม่บอกให้ทำเครื่องหมาย '(สมมุติเพื่อภาพ)'. "
-    )
-
-
-def _prompt_ref_context_schema_text():
-    human = (
-        '{"name":"","entity_type":"human","story_role":"","importance":"main","needs_ref":true,'
-        '"appears_on_screen":true,"relationships":[],"อายุ":"","เพศ":"","อาชีพ":"","ฐานะ":"",'
-        '"รูปร่าง":"","ส่วนสูง":"","สีผิว":"","ทรงผม":"","ใบหน้า":"","ดวงตา":"","เสื้อผ้า":"",'
-        '"visual_identity":"","ลักษณะเด่น":"","temporary_states":[],"assumptions":[],"evidence":[],"@ref":null}'
-    )
-    supporting = human.replace('"importance":"main"', '"importance":"supporting"')
-    return (
-        '{"version":4,"story":{"title":"","summary":"","era":"","main_location":"","key_places":[]},'
-        '"main_characters":[' + human + '],'
-        '"supporting_characters":[' + supporting + '],'
-        '"animals":[{"name":"","entity_type":"animal","species":"","story_role":"","importance":"supporting","needs_ref":true,'
-        '"appears_on_screen":true,"visual_identity":"","ลักษณะเด่น":"","temporary_states":[],"assumptions":[],"evidence":[],"@ref":null}],'
-        '"supernatural_entities":[{"name":"","entity_type":"supernatural_unknown","story_role":"","certainty":"ambiguous","needs_ref":true,'
-        '"appears_on_screen":true,"visual_identity":"","ลักษณะเด่น":"","temporary_states":[],"assumptions":[],"evidence":[],"@ref":null}],'
-        '"locations":[{"name":"","type":"","story_role":"","needs_ref":true,"visual_identity":"","assumptions":[],"evidence":[]}],'
-        '"props":[{"name":"","type":"prop","story_role":"","needs_ref":true,"visual_identity":"","assumptions":[],"evidence":[]}],'
-        '"scene_map":[],"visual_rules":{"tone":"","lighting":{},"palette":"","camera":{},"style":""},'
-        '"forbidden":["ห้ามย้ายสถานที่ออกจาก CURRENT SCENE","ห้ามดึงเหตุการณ์จากฉากอื่น"],"locks":{}}'
-    )
-
-
-def _normalize_prompt_ref_breakdown(parsed):
-    """Validate categorized Story Breakdown and build legacy flat characters."""
-    if not isinstance(parsed, dict):
-        raise RuntimeError("GPT คืน Story Breakdown ไม่ใช่ JSON object")
-    story = parsed.get("story")
-    if not isinstance(story, dict):
-        raise RuntimeError("Story Breakdown ไม่มี story")
-
-    categories = (
-        ("main_characters", "human", "main"),
-        ("supporting_characters", "human", "supporting"),
-        ("animals", "animal", "supporting"),
-        ("supernatural_entities", "supernatural_unknown", "supporting"),
-    )
-    flat = []
-    seen = set()
-    visual_fields = (
-        "อายุ", "เพศ", "อาชีพ", "ฐานะ", "รูปร่าง", "ส่วนสูง", "สีผิว",
-        "ทรงผม", "ใบหน้า", "ดวงตา", "เสื้อผ้า", "visual_identity", "ลักษณะเด่น",
-    )
-    for key, default_type, default_importance in categories:
-        items = parsed.get(key)
-        if not isinstance(items, list):
-            raise RuntimeError(f"Story Breakdown ไม่มี array {key}")
-        cleaned = []
-        for raw in items:
-            if not isinstance(raw, dict):
-                continue
-            item = dict(raw)
-            name = str(item.get("name") or "").strip()
-            if not name:
-                continue
-            item["name"] = name
-            item["entity_type"] = str(item.get("entity_type") or default_type).strip()
-            item["importance"] = str(item.get("importance") or default_importance).strip()
-            item["needs_ref"] = bool(item.get("needs_ref", False))
-            item["appears_on_screen"] = bool(item.get("appears_on_screen", True))
-            item["story_role"] = str(item.get("story_role") or item.get("บทบาท") or "").strip()
-            for field in visual_fields:
-                item[field] = str(item.get(field) or "").strip()
-            for field in ("relationships", "temporary_states", "assumptions", "evidence"):
-                if not isinstance(item.get(field), list):
-                    item[field] = []
-            item["@ref"] = item.get("@ref") or name
-            cleaned.append(item)
-
-            compat = dict(item)
-            compat["บทบาท"] = item["story_role"]
-            if not compat.get("ลักษณะเด่น"):
-                compat["ลักษณะเด่น"] = item.get("visual_identity", "")
-            identity_key = (item["entity_type"].casefold(), name.casefold())
-            if identity_key not in seen:
-                seen.add(identity_key)
-                flat.append(compat)
-        parsed[key] = cleaned
-
-    for key in ("locations", "props", "scene_map"):
-        if not isinstance(parsed.get(key), list):
-            raise RuntimeError(f"Story Breakdown ไม่มี array {key}")
-    parsed["version"] = 4
-    parsed["characters"] = flat
-    parsed["breakdown_source_of_truth"] = [
-        "main_characters", "supporting_characters", "animals", "supernatural_entities", "locations", "props"
-    ]
-    return parsed
-
-
-def _persist_prompt_ref_breakdown(parsed):
-    """Persist the canonical categorized view separately for inspection/debugging."""
-    try:
-        keys = (
-            "version", "story", "main_characters", "supporting_characters",
-            "animals", "supernatural_entities", "locations", "props", "scene_map",
-            "visual_rules", "forbidden", "locks",
-        )
-        canonical = {key: parsed.get(key) for key in keys if key in parsed}
-        (BASE / "story_breakdown.json").write_text(
-            json.dumps(canonical, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-        )
-    except Exception as exc:
-        print(f"[SnapGen] persist story_breakdown.json skipped: {exc}")
-
-
-def _prompt_ref_visual_bible_incomplete(parsed):
-    """Return True when a Ref-worthy entity is still too vague for stable image generation."""
-    weak_exact = {"", "ไม่ระบุ", "unknown", "none", "null", "ชายไทยทั่วไป", "หญิงไทยทั่วไป", "คนไทยทั่วไป"}
-    required_human = ("อายุ", "เพศ", "รูปร่าง", "ส่วนสูง", "สีผิว", "ทรงผม", "ใบหน้า", "ดวงตา", "เสื้อผ้า", "visual_identity")
-    for key in ("main_characters", "supporting_characters"):
-        for item in parsed.get(key) or []:
-            if not isinstance(item, dict) or not item.get("needs_ref"):
-                continue
-            for field in required_human:
-                value = " ".join(str(item.get(field) or "").split()).strip()
-                if value.casefold() in weak_exact:
-                    return True
-            identity = " ".join(str(item.get("visual_identity") or "").split()).strip()
-            if len(identity) < 45 or identity.endswith("ทั่วไป") or "ทั่วไป (สมมุติเพื่อภาพ)" in identity:
-                return True
-    for key in ("animals", "supernatural_entities"):
-        for item in parsed.get(key) or []:
-            if not isinstance(item, dict) or not item.get("needs_ref"):
-                continue
-            identity = " ".join(str(item.get("visual_identity") or "").split()).strip()
-            if not identity or identity.casefold() in weak_exact or len(identity) < 30:
-                return True
-    return False
-
-
-def _prompt_ref_context_needs_audit(parsed, story_text=""):
-    try:
-        normalized = _normalize_prompt_ref_breakdown(dict(parsed))
-    except Exception:
-        return True
-    total_entities = sum(len(normalized.get(key) or []) for key in (
-        "main_characters", "supporting_characters", "animals", "supernatural_entities"
-    ))
-    return total_entities == 0 or not normalized.get("locations") or _prompt_ref_visual_bible_incomplete(normalized)
-
-
-def _audit_prompt_ref_context(reply, story_text=""):
-    """Semantic correction + mandatory visual-bible repair in the same story history."""
-    parsed = _parse_bridge_context_json(reply)
-    parsed = _normalize_prompt_ref_breakdown(parsed)
-    current = json.dumps({k: v for k, v in parsed.items() if k != "characters"}, ensure_ascii=False)
-    audit_prompt = (
-        "ตรวจ STORY BREAKDOWN JSON ด้านล่างเทียบกับ FULL STORY/ไฟล์ DOCX ในประวัติเดียวกันอีกครั้ง. "
-        "คืน JSON ใหม่ทั้ง object เท่านั้น ห้าม markdown. อย่าเปลี่ยนโครงสร้างหมวด. "
-        "ตรวจ coverage และแก้ Character/Entity Visual Bible ให้พร้อมสร้าง Ref ตามกฎทั้งหมด. "
-        + _prompt_ref_context_quality_rules()
-        + "ใช้ schema นี้เท่านั้น: " + _prompt_ref_context_schema_text()
-        + "\nCURRENT_STORY_BREAKDOWN_JSON:\n" + current
-    )
-    repaired = _prompt_ref_chat([{"role": "user", "content": audit_prompt}], require_history=True)
-    if repaired:
-        try:
-            parsed = _normalize_prompt_ref_breakdown(_parse_bridge_context_json(repaired))
-        except Exception as exc:
-            print(f"[SnapGen] Story Breakdown audit fallback to first pass: {exc}")
-
-    if _prompt_ref_visual_bible_incomplete(parsed):
-        current = json.dumps({k: v for k, v in parsed.items() if k != "characters"}, ensure_ascii=False)
-        visual_repair_prompt = (
-            "VISUAL BIBLE REPAIR REQUIRED. JSON นี้ยังมี entity ที่ needs_ref=true แต่รายละเอียดภาพไม่พอสร้าง Ref. "
-            "อ้างอิง FULL STORY/ไฟล์ DOCX ที่อยู่ในประวัติเดียวกัน ห้ามเปลี่ยนชื่อ หมวด entity_type story_role importance needs_ref หรือเหตุการณ์. "
-            "เติม/แก้เฉพาะรายละเอียดภาพให้เฉพาะเจาะจงและสมเหตุผล. สำหรับมนุษย์ต้องมี อายุ เพศ รูปร่าง ส่วนสูง สีผิว ทรงผม ใบหน้า ดวงตา เสื้อผ้า ลักษณะเด่น visual_identity ครบ. "
-            "ห้ามใช้ 'ไม่ระบุ' หรือคำกว้าง ๆ เช่น 'ชายไทยทั่วไป'. สิ่งที่บทไม่ได้ระบุให้เลือกแบบที่เหมาะกับยุค สถานที่ บทบาท อาชีพ ฐานะ ครอบครัว และเหตุการณ์หลัก แล้วลงท้าย field นั้นด้วย '(สมมุติเพื่อภาพ)'. "
-            "evidence ต้องคงเป็นข้อเท็จจริงจากบทเท่านั้น; assumptions ใช้บันทึกสิ่งที่สมมุติ. เสื้อผ้าเลือกชุดหลักเพียงชุดเดียว. "
-            "COSTUME DIFFERENTIATION: ก่อน finalize เปรียบเทียบเสื้อผ้าของ human characters ทั้งหมดพร้อมกัน — "
-            "ห้ามให้ 2 ตัวละครหลักมี top/silhouette/palette family เดียวกัน ห้ามทุกคนสีหม่น/neutral เหมือนกัน "
-            "ระบุสีจริงวัสดุจริงทรงจริง ไม่ใช่ 'เสื้อผ้าที่เหมาะกับ...' — ตัดสินใจเลือกมาเลย. "
-            "เพิ่ม costume_identity สำหรับ human ที่ needs_ref=true: signature_palette/signature_silhouette/recognition_cue/avoid_overlap_with. "
-            "คืน JSON object เต็มตาม schema เท่านั้น ห้าม markdown. schema: " + _prompt_ref_context_schema_text()
-            + "\nCURRENT_STORY_BREAKDOWN_JSON:\n" + current
-        )
-        repaired_visual = _prompt_ref_chat([{"role": "user", "content": visual_repair_prompt}], require_history=True)
-        if repaired_visual:
-            try:
-                parsed = _normalize_prompt_ref_breakdown(_parse_bridge_context_json(repaired_visual))
-            except Exception as exc:
-                print(f"[SnapGen] Visual Bible repair fallback to audit result: {exc}")
-
-    _persist_prompt_ref_breakdown(parsed)
-    return parsed
-
-
 def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
     """Send a story in small turns, then build Context in the same history."""
     story = str(full_story or "").strip()
@@ -7989,18 +8282,23 @@ def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
         "content": (
             "ตอบ JSON object เท่านั้น ห้าม markdown ห้ามอธิบาย ห้ามบอกว่าไม่มีไฟล์แนบ "
             "เพราะบทครบทุก FULL_STORY_PART อยู่ในประวัติเดียวกัน ใช้ข้อมูลจากบทจริง; รายละเอียดภาพที่บทไม่ระบุแต่จำเป็น "
-            "ให้สมมุติอย่างสมเหตุผลและลงท้าย '(สมมุติเพื่อภาพ)'. "
-            + _prompt_ref_context_quality_rules()
-            + "schema: " + _prompt_ref_context_schema_text()
+            "ให้สมมุติอย่างสมเหตุผลและลงท้าย '(สมมุติเพื่อภาพ)'. schema: "
+            "{\"version\":3,\"story\":{\"title\":\"\",\"summary\":\"\",\"era\":\"\",\"main_location\":\"\",\"key_places\":[]},"
+            "\"characters\":[{\"name\":\"\",\"อายุ\":\"\",\"เพศ\":\"\",\"บทบาท\":\"\",\"รูปร่าง\":\"\",\"ส่วนสูง\":\"\","
+            "\"สีผิว\":\"\",\"ทรงผม\":\"\",\"ใบหน้า\":\"\",\"ดวงตา\":\"\",\"เสื้อผ้า\":\"\",\"visual_identity\":\"\","
+            "\"ลักษณะเด่น\":\"\",\"must_include\":[],\"must_not_include\":[],\"assumptions\":[],\"@ref\":null}],"
+            "\"locations\":[{\"name\":\"\",\"type\":\"\",\"parent_location\":\"\",\"story_fact\":\"\",\"visual_description\":\"\","
+            "\"atmosphere\":\"\",\"materials\":\"\",\"visible_elements\":[],\"views\":[],\"must_include\":[],\"must_not_include\":[],\"assumptions\":[]}],"
+            "\"props\":[],\"scene_map\":[],\"visual_rules\":{\"tone\":\"\",\"lighting\":{},\"palette\":\"\",\"camera\":{},\"style\":\"\"},"
+            "\"forbidden\":[],\"locks\":{}}"
         ),
     }], require_history=True)
     if not reply:
         raise RuntimeError("GPT รับบทแล้วแต่ไม่ส่ง Context กลับมา")
-    parsed = _audit_prompt_ref_context(reply, story)
     _prompt_ref_conversation["story_hash"] = _prompt_ref_story_hash(story)
     _save_prompt_ref_conversation()
     _mark_prompt_ref_context_ready()
-    return json.dumps(parsed, ensure_ascii=False)
+    return reply
 
 
 def _attach_docx_and_build_prompt_ref_context(source_file, story_for_hash=""):
@@ -8052,43 +8350,85 @@ def _attach_docx_and_build_prompt_ref_context(source_file, story_for_hash=""):
             "จากไฟล์ DOCX ที่แนบอยู่ในประวัติเดียวกัน ตอบ JSON object เท่านั้น ห้าม markdown ห้ามอธิบาย "
             "ห้ามบอกว่าไม่มีไฟล์แนบ ใช้ข้อมูลจากไฟล์จริง; รายละเอียดภาพที่ไฟล์ไม่ระบุแต่จำเป็นให้สมมุติ "
             "อย่างสมเหตุผลและลงท้าย '(สมมุติเพื่อภาพ)'. "
-            "กฎชื่อ: ถ้ามีชื่อเฉพาะให้ใช้ชื่อเฉพาะจากบท; ถ้าไม่มีชื่อเฉพาะแต่ entity สำคัญต่อภาพ ให้ใช้คำเรียกที่บทใช้และจำแนกได้. "
-            "ข้อมูลวัย/สถานะชั่วคราวให้ใส่ใน field ที่เหมาะสม ไม่ต่อท้าย name. @ref ต้องใช้ชื่อเดียวกับ name. "
-            + _prompt_ref_context_quality_rules()
-            + "schema: " + _prompt_ref_context_schema_text()
+            "กฎชื่อ character บังคับ: ช่อง name ต้องเป็นชื่อที่บทใช้เรียกบุคคลนั้นในเนื้อเรื่องจริง; "
+            "ชื่อหรือคำในวงเล็บท้ายบรรทัดหัวเรื่องเป็น metadata ไม่ใช่ตัวละคร เว้นแต่ชื่อนั้นปรากฏเป็นผู้พูดหรือผู้กระทำในเนื้อเรื่องด้วย; "
+            "ถ้าผู้เล่าบอกชื่อตัวเองด้วยข้อความเช่น 'ผมชื่อ ...' ให้ใช้ชื่อนั้นและให้หลักฐานนี้มีลำดับเหนือกว่าหัวเรื่อง; "
+            "ห้ามใส่คำบอกวัยหรือประเภทบุคคลต่อท้าย name; ถ้ายังไม่ทราบชื่อให้ใช้ ผู้เล่า เท่านั้น; "
+            "ข้อมูลว่าเป็นเด็กให้ใส่ใน อายุ บทบาท หรือ visual_identity แทน; @ref ต้องใช้ชื่อเดียวกับ name. schema: "
+            '{"version":3,"story":{"title":"","summary":"","era":"","main_location":"","key_places":[]},'
+            '"characters":[{"name":"","อายุ":"","เพศ":"","บทบาท":"","รูปร่าง":"","ส่วนสูง":"",'
+            '"สีผิว":"","ทรงผม":"","ใบหน้า":"","ดวงตา":"","เสื้อผ้า":"","visual_identity":"",'
+            '"ลักษณะเด่น":"","must_include":[],"must_not_include":[],"assumptions":[],"@ref":null}],'
+            '"locations":[{"name":"","type":"","parent_location":"","story_fact":"","visual_description":"",'
+            '"atmosphere":"","materials":"","visible_elements":[],"views":[],"must_include":[],"must_not_include":[],"assumptions":[]}],'
+            '"props":[],"scene_map":[],"visual_rules":{"tone":"","lighting":{},"palette":"","camera":{},"style":""},'
+            '"forbidden":["ห้ามย้ายสถานที่ออกจาก CURRENT SCENE","ห้ามดึงเหตุการณ์จากฉากอื่น"],"locks":{}}'
         ),
     }], require_history=True)
     if not reply:
         raise RuntimeError("GPT อ่าน DOCX แล้วแต่ไม่ส่ง Context กลับมา")
-    parsed = _audit_prompt_ref_context(reply, story_for_hash)
     _prompt_ref_conversation["story_hash"] = _prompt_ref_story_hash(story_for_hash or source.read_bytes().hex())
     _save_prompt_ref_conversation()
     _mark_prompt_ref_context_ready()
-    return json.dumps(parsed, ensure_ascii=False)
+    return reply
 
 
 def _build_prompt_ref_context_in_history():
     """Create shared Ref/Prop context as the next turn in Prompt-Ref's story chat."""
+    analysis_raw = _prompt_ref_chat([{
+        "role": "user",
+        "content": (
+            "อ่าน FULL STORY ที่อยู่ในประวัตินี้แล้วสรุปข้อเท็จจริงก่อน โดยยังไม่ต้องสร้าง SnapGen Context. "
+            "ตอบ JSON เท่านั้น: "
+            '{"summary":"","protagonist":{"name":"","evidence":[]},"characters":'
+            '[{"name":"","role":"","evidence":[]}],"locations":[{"name":"","evidence":[]}],'
+            '"props":[{"name":"","evidence":[]}]} '
+            "ระบุตัวเอกและตัวละครจากสิ่งที่พูดหรือกระทำในเนื้อเรื่องจริง พร้อมข้อความหลักฐานสั้นๆ จากบท. "
+            "ถ้าผู้เล่าบอกชื่อตัวเอง เช่น 'ผมชื่อ ...' ให้ใช้ชื่อนั้น. "
+            "คำในวงเล็บท้ายหัวเรื่องเป็น metadata เว้นแต่ปรากฏเป็นบุคคลในเนื้อเรื่องด้วย. "
+            "เก็บตัวละคร สถานที่ และพร็อพที่มีผลต่อเหตุการณ์ให้ครบ"
+        ),
+    }], require_history=True)
+    analysis = _parse_bridge_context_json(analysis_raw)
+    if (not isinstance(analysis.get("protagonist"), dict)
+            or not isinstance(analysis.get("characters"), list)
+            or not isinstance(analysis.get("locations"), list)):
+        raise RuntimeError("GPT วิเคราะห์บทไม่ครบ: ต้องมี protagonist, characters และ locations")
+    (BASE / "prompt_ref_story_analysis.json").write_text(
+        json.dumps(analysis, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    analysis_json = json.dumps(analysis, ensure_ascii=False)
+
     reply = _prompt_ref_chat([{
         "role": "user",
         "content": (
-            "จาก FULL STORY ที่อ่านไว้ในประวัติเดียวกัน สร้างข้อมูลกลางสำหรับหน้า Ref, Prop และงานรักษา continuity ของ SnapGen "
+            f"แปลง STORY_ANALYSIS_JSON ที่บันทึกจากขั้นวิเคราะห์เป็น SnapGen Context เท่านั้น:\n{analysis_json}\n\n"
+            "ห้ามตีความตัวละครหรือเปลี่ยนชื่อใหม่ ให้รักษาชื่อ บทบาท สถานที่ และพร็อพจาก STORY_ANALYSIS_JSON ตรงตามเดิม. "
             "ตอบ JSON object เท่านั้น ห้าม markdown ห้ามบอกว่าไม่มีไฟล์แนบ เพราะบทอยู่ในประวัติแล้ว "
             "ใช้ข้อมูลจากบทจริง; รายละเอียดภาพที่บทไม่ระบุแต่จำเป็นให้สมมุติอย่างสมเหตุผลและลงท้าย '(สมมุติเพื่อภาพ)'. "
-            "กฎชื่อ: ถ้ามีชื่อเฉพาะให้ใช้ชื่อเฉพาะจากบท; ถ้าไม่มีชื่อแต่เป็น visual story entity สำคัญ ให้ใช้คำเรียกที่บทใช้และจำแนกได้. "
-            "ห้ามเอาวัย สภาพศพ อาการป่วย หรือสถานะชั่วคราวไปต่อท้าย name. @ref ต้องใช้ชื่อเดียวกับ name. "
-            + _prompt_ref_context_quality_rules()
-            + "schema: " + _prompt_ref_context_schema_text()
+            "กฎชื่อ character บังคับ: ช่อง name ต้องเป็นชื่อที่บทใช้เรียกบุคคลนั้นในเนื้อเรื่องจริง; "
+            "ชื่อหรือคำในวงเล็บท้ายบรรทัดหัวเรื่องเป็น metadata ไม่ใช่ตัวละคร เว้นแต่ชื่อนั้นปรากฏเป็นผู้พูดหรือผู้กระทำในเนื้อเรื่องด้วย; "
+            "ถ้าผู้เล่าบอกชื่อตัวเองด้วยข้อความเช่น 'ผมชื่อ ...' ให้ใช้ชื่อนั้นและให้หลักฐานนี้มีลำดับเหนือกว่าหัวเรื่อง; "
+            "ห้ามใส่คำบอกวัยหรือประเภทบุคคลต่อท้าย name; ถ้ายังไม่ทราบชื่อให้ใช้ ผู้เล่า เท่านั้น; "
+            "ข้อมูลว่าเป็นเด็กให้ใส่ใน อายุ บทบาท หรือ visual_identity แทน; @ref ต้องใช้ชื่อเดียวกับ name. "
+            "schema: {\"version\":3,\"story\":{\"title\":\"ชื่อเรื่องสั้นจากบรรทัดหัวเรื่องของบท\",\"summary\":\"\",\"era\":\"\",\"main_location\":\"\",\"key_places\":[]},"
+            "\"characters\":[{\"name\":\"\",\"อายุ\":\"\",\"เพศ\":\"\",\"บทบาท\":\"\",\"รูปร่าง\":\"\",\"ส่วนสูง\":\"\","
+            "\"สีผิว\":\"\",\"ทรงผม\":\"\",\"ใบหน้า\":\"\",\"ดวงตา\":\"\",\"เสื้อผ้า\":\"\",\"visual_identity\":\"\","
+            "\"ลักษณะเด่น\":\"\",\"must_include\":[],\"must_not_include\":[],\"assumptions\":[],\"@ref\":null}],"
+            "\"locations\":[{\"name\":\"\",\"type\":\"\",\"parent_location\":\"\",\"story_fact\":\"\",\"visual_description\":\"\","
+            "\"atmosphere\":\"\",\"materials\":\"\",\"visible_elements\":[],\"views\":[],\"must_include\":[],\"must_not_include\":[],\"assumptions\":[]}],"
+            "\"props\":[],\"scene_map\":[],\"visual_rules\":{\"tone\":\"\",\"lighting\":{},\"palette\":\"\",\"camera\":{},\"style\":\"\"},"
+            "\"forbidden\":[\"ห้ามย้ายสถานที่ออกจาก CURRENT SCENE\",\"ห้ามดึงเหตุการณ์จากฉากอื่น\"],\"locks\":{}}. "
+            "เก็บสถานที่ที่มีเหตุการณ์เกิดจริง ตัวละครทุกคน และ props สำคัญให้ครบ"
         ),
     }], require_history=True)
-    story_text = ""
-    try:
-        source_path = BASE / "prompt_ref_source.txt"
-        if source_path.is_file():
-            story_text = source_path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        story_text = ""
-    parsed = _audit_prompt_ref_context(reply, story_text)
+    parsed = _parse_bridge_context_json(reply)
+    story = parsed.get("story") if isinstance(parsed, dict) else None
+    if not isinstance(story, dict) or not isinstance(parsed.get("characters"), list) or not isinstance(parsed.get("locations"), list):
+        raise RuntimeError("GPT คืน Context ไม่ครบ")
+    if not parsed.get("characters") and not parsed.get("locations"):
+        raise RuntimeError("GPT คืน Context ว่าง")
     _mark_prompt_ref_context_ready()
     return parsed
 
@@ -8096,6 +8436,71 @@ def _build_prompt_ref_context_in_history():
 
 PROMPT_REF_STORYBOARD_PLAN = BASE / "prompt_ref_storyboard_plan.json"
 PROMPT_REF_STORYBOARD_IMAGE_META = BASE / "prompt_ref_storyboard_image.json"
+STORY_RUNS_DIR = BASE / "meta" / "story_runs"
+_story_run_state = {"run": None}
+
+
+def _active_story_run():
+    value = _story_run_state.get("run")
+    return value if isinstance(value, dict) else {}
+
+
+def _write_story_run(run):
+    if not isinstance(run, dict) or not run.get("run_id"):
+        return
+    _story_run_state["run"] = run
+    _story_save_run(BASE, run)
+
+
+def _story_run_for_prompt(prompt_index=None):
+    run = _active_story_run()
+    if not run:
+        # Restore the latest completed run after restarting the program.  The
+        # run id is stored with the direct storyboard result, so a Slot from an
+        # older run cannot be guessed from the current bank alone.
+        try:
+            direct = json.loads((BASE / "prompt_ref_storyboard_direct.json").read_text(encoding="utf-8"))
+            run_id = str(direct.get("run_id") or "").strip() if isinstance(direct, dict) else ""
+            if run_id:
+                run = _story_load_run(BASE, run_id)
+                if run.get("status") == "ready":
+                    _story_run_state["run"] = run
+        except Exception:
+            run = {}
+    if not run or run.get("status") not in {"running", "ready"}:
+        return {}
+    if prompt_index is None:
+        return run
+    try:
+        prompt_index = int(prompt_index)
+    except (TypeError, ValueError):
+        return run
+    if prompt_index == 11 or prompt_index in {int(x.get("slot") or 0) for x in run.get("image_entries") or [] if isinstance(x, dict)}:
+        return run
+    return {}
+
+
+def _story_ref_age_allowed(path, prompt):
+    """Reject an adult same-name sheet when the current shot is newborn/child."""
+    text = str(prompt or "").casefold()
+    if not re.search(r"ทารกแรกเกิด|ทารก|แรกเกิด|newborn|infant|baby", text, re.I):
+        return True
+    stem = Path(str(path or "")).stem.casefold()
+    stem = re.sub(r"[\s_\-./\\]+", "", stem)
+    stem = re.sub(r"^(?:พระนาง|พระราชา|พระ|นางสาว|นาง|นาย|ท้าว|แม่ทัพ|คุณ)", "", stem)
+    names = re.findall(r"@([^\s@,;:!?()]+)", text)
+    return not any(
+        stem == re.sub(r"^(?:พระนาง|พระราชา|พระ|นางสาว|นาง|นาย|ท้าว|แม่ทัพ|คุณ)", "", re.sub(r"[\s_\-./\\]+", "", name.casefold()))
+        for name in names
+    )
+
+
+g["_story_run_for_prompt"] = _story_run_for_prompt
+g["_story_current_scene_text"] = lambda run_id=None: _story_current_scene_text(BASE, run_id)
+g["_storyboard_panel_crop"] = _storyboard_panel_crop
+g["_story_is_storyboard_derived"] = _story_is_storyboard_derived
+g["_story_authority_block"] = _story_authority_block
+g["_story_ref_age_allowed"] = _story_ref_age_allowed
 
 
 def _prompt_ref_storyboard_matching_refs(story_text):
@@ -8219,6 +8624,7 @@ def _build_prompt_ref_storyboard_image_request(story_text, preflight=None, ref_n
         "ทุกช่องต้องมีขนาดเท่ากันและภาพภายในแต่ละช่องยังเป็นเฟรมแนวนอนอัตราส่วน 16:9 จริง โดยเว้นระยะระหว่างช่องให้ชัด ห้ามบีบภาพ ห้ามยืดภาพ และห้ามครอปเป็นแถบผิดสัดส่วน. "
         "เรียงลำดับจากซ้ายไปขวา แล้วลงแถวถัดไป เป็นกริด 2 คอลัมน์ 6 แถว รวม 12 ช่องพอดี ใช้พื้นที่แนวตั้งเต็มแผ่นเพื่อรักษารายละเอียดของแต่ละช่อง. "
         "ใต้ภาพของแต่ละช่องให้มีแถบข้อความสั้น ไม่วางข้อความด้านซ้ายของภาพ. ข้อความมีเฉพาะเลข SHOT, shot size เช่น WS/MS/MCU/CU, lens เช่น 50mm, เวลาเช่น 5s "
+        "ใช้ shot-size abbreviation และ caption สั้นสำหรับตรวจย้อนหลัง. "
         "และ action caption สั้นไม่เกิน 6 คำหนึ่งบรรทัด. ห้ามใส่ย่อหน้ายาว ห้ามใส่ Prompt เต็ม และห้ามเพิ่มเหตุการณ์ที่ไม่มีในฉาก. "
         "ใช้รูปอ้างอิงที่แนบมาเพื่อล็อกใบหน้า อายุ รูปร่าง ทรงผม เสื้อผ้า สถานที่ และพร็อพที่ตรงกัน รักษาบุคคลเดิมให้เหมือนกันครบทั้ง 12 ช่อง ห้ามออกแบบหน้าใหม่หรือสลับคน. "
         "FINAL LIGHTING OVERRIDE: ใช้ " + light_label + " PRESET นี้กับทุกช่องในฉาก และห้ามดึงหรือผสม preset ช่วงเวลาอื่น: "
@@ -8230,6 +8636,8 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
     if not _prompt_ref_context_history_ready():
         raise RuntimeError("Context JSON ยังไม่ได้อยู่ในประวัติ Prompt-Ref เดิม — อัปเดต Context ก่อนสร้าง Storyboard")
     # Three-step flow: analyze scene -> match refs -> generate storyboard.
+    # `_prompt_ref_storyboard_matching_refs` is the canonical ref matcher.
+    # The provider call intentionally receives `ref_images=(encoded_refs or None)`.
     log_fn = g.get("_img_log") or (lambda message: print("[Prompt-Ref Storyboard] " + str(message)))
     log_fn("[1/3] วิเคราะห์บทสั้น: ตัวละคร สถานที่ พร็อพ และช่วงแสง")
     preflight = _analyze_prompt_ref_storyboard_preflight(story_text)
@@ -8253,12 +8661,12 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         aspect_ratio="9:16",
         save_sidecar=False,
         log_fn=log_fn,
-        # Preflight already reads the existing Prompt-Ref history. Generate the
-        # actual storyboard through the same direct image/edit path as Image AI,
-        # then return the saved image to Prompt Lab for Vision prompt splitting.
-        use_story_history=bool(_imgmod.has_story_conversation()),
-        conversation_state=None,
-        conversation_save_fn=None,
+        # Build the new Storyboard from the exact Prompt-Ref Context history,
+        # never from Image AI's previous Storyboard. After it is saved below,
+        # register this exact new board in Image AI before any scene is made.
+        use_story_history=False,
+        conversation_state=_prompt_ref_conversation,
+        conversation_save_fn=_save_prompt_ref_conversation,
     )
     if str(_prompt_ref_conversation.get("conversation_id") or "") != history_conversation_id:
         escaped_conversation_id = str(_prompt_ref_conversation.get("conversation_id") or "")
@@ -8273,7 +8681,21 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("สร้าง Storyboard แล้วแต่ไม่พบไฟล์ภาพ")
     try:
-        _remember_image_prompt_link(output_path, prompt_index=11, image_prompt=request_prompt)
+        current_run = _active_story_run()
+        _remember_image_prompt_link(
+            output_path,
+            prompt_index=11,
+            image_prompt=request_prompt,
+            provenance={
+                "run_id": current_run.get("run_id"),
+                "storyboard_path": str(output_path.resolve()),
+                "scene_hash": current_run.get("scene_hash"),
+                "context_hash": current_run.get("context_hash"),
+                "refs": ref_names,
+                "final_prompt": request_prompt,
+                "output_kind": "storyboard",
+            },
+        )
     except Exception:
         pass
     meta = {
@@ -8304,6 +8726,10 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
+    # Register every newly generated Storyboard in Image AI immediately.  The
+    # shared helper also starts Image AI's story history from Prompt-Ref when
+    # this is the first Storyboard, so users never need to press New History.
+    _imgmod.ensure_latest_storyboard_context(log_fn=log_fn)
     return str(output_path)
 def _build_prompt_ref_storyboard_analysis_request(story_text):
     story = str(story_text or "").strip()
@@ -8587,17 +9013,17 @@ def _generate_prompts_from_storyboard_plan(story_text, plan):
         previous_shot = shots[index - 2] if index > 1 else None
         next_shot = shots[index] if index < len(shots) else None
         system = (
-            "คุณคือฝ่าย Prompt Production. ภาพ Storyboard ที่คุณสร้างไว้ในประวัติแชทนี้คือแหล่งข้อมูลภาพหลักและเป็น source of truth. "
+            "คุณคือฝ่าย Prompt Production. CURRENT SCENE และ Context คือ source of truth สำหรับตัวละคร ความสัมพันธ์ และผู้กระทำ/ผู้ถูกกระทำ; ภาพ Storyboard ใช้ยืนยันองค์ประกอบ ตำแหน่ง และการจัดเฟรมที่มองเห็นเท่านั้น. "
             "เขียน Prompt สำหรับช่อง Storyboard ปัจจุบันเพียงช่องเดียว โดยกลับไปดูองค์ประกอบจริงในภาพ ได้แก่ ตัวละคร ตำแหน่ง ระยะภาพ "
             "มุมกล้อง ทิศทางสายตา ฉากหน้า-กลาง-หลัง แสง และ screen direction แล้วใช้ผลวิเคราะห์ APPROVED SHOT ช่วยระบุหมายเลขช่อง. "
-            "ห้ามเพิ่ม ลบ รวม แยก หรือเปลี่ยนสิ่งที่เห็นในช่องนั้น และห้ามกำกับภาพใหม่จากบทข้อความ. "
+            "ห้ามเพิ่ม ลบ รวม แยก หรือเปลี่ยนองค์ประกอบสำคัญที่เห็นในช่องนั้น แต่ต้องใช้บทกำกับว่าใครทำอะไรกับใคร. ถ้าบทกับภาพขัดกัน ให้ยึดบทสำหรับการกระทำและความสัมพันธ์ แล้วใช้ภาพเฉพาะเป็นแนวทางตำแหน่ง/องค์ประกอบ. ห้ามสลับผู้ถือกับผู้ถูกถือ เช่น บทบอกว่าแม่อุ้มลูก ต้องเขียนว่าแม่เป็นผู้อุ้มและลูกเป็นผู้ถูกอุ้ม. "
             "ตอบ JSON object เดียว ไม่มี markdown ไม่มีข้อความนอก JSON. ต้องมี keys: "
             "shot_role, beat, completed_before, this_clip_only, reserved_for_later, start_state, end_state, refs, video_prompt, image_prompt. "
             "Image Prompt ต้องขึ้นต้นว่า 'สร้างรูปภาพ' และถอด keyframe เริ่มต้นจากช่องภาพจริงก่อน action หลักเกิด ยาวอย่างน้อย 120 ตัวอักษร. "
-            "Video Prompt ต้องเป็น continuous shot เดียวต่อยอดจาก keyframe นั้น ยาวอย่างน้อย 120 ตัวอักษร และมีคำว่า 'เฟรมเริ่มต้น' กับ 'เฟรมจบ'. "
+            "Video Prompt ต้องเป็น continuous shot เดียวต่อยอดจาก keyframe นั้น ยาวอย่างน้อย 120 ตัวอักษร และมีคำว่า 'เฟรมเริ่มต้น' กับ 'เฟรมจบ'. ห้ามกำหนดหรือกล่าวถึง camera movement, zoom, push-in, pull-out, pan, tilt, dolly, tracking, handheld หรือ static camera เพราะเมนู กล้อง ของ Slot จะเป็นผู้กำหนดเอง. "
             "ใน image_prompt และ video_prompt ให้บรรยายภาพโดยตรง ห้ามใช้คำว่า Storyboard, contact sheet, grid, panel หรือรวมซีน. "
             "ใช้ refs เฉพาะชื่อไฟล์ใน AVAILABLE REFERENCE FILES แบบตรงตัว ถ้าไม่ตรงให้ใช้ []. "
-            "completed_before ต้องไม่เล่นเหตุการณ์ก่อนหน้าซ้ำ และ reserved_for_later ต้องกันเหตุการณ์ของช่องถัดไปไม่ให้เกิดเร็วเกินไป."
+            "completed_before ต้องไม่เล่นเหตุการณ์ก่อนหน้าซ้ำ และ reserved_for_later ต้องกันเหตุการณ์ของช่องถัดไปไม่ให้เกิดเร็วเกินไป. อ่าน CURRENT SCENE ก่อนอ่านภาพทุกครั้ง."
         )
         context = {
             "current_shot_number": index,
@@ -8773,7 +9199,13 @@ def _load_prompt_ref_storyboard_character_context(scene_text=""):
         if not isinstance(item, dict):
             continue
         original_name = re.sub(r"\s+", " ", str(item.get("name") or "")).strip()
-        name = _storyboard_character_name_only(original_name)
+        # Keep this helper usable by the mobile/headless path even when the
+        # recovered legacy name normalizer is not loaded in the test shell.
+        try:
+            name = _storyboard_character_name_only(original_name)
+        except NameError:
+            name = re.sub(r"\s+", " ", original_name).strip()
+            name = re.sub(r"\s*\([^)]*\)\s*$", "", name).strip()
         if not name:
             continue
         role = re.sub(r"\s+", " ", str(item.get("บทบาท") or item.get("role") or "")).strip()
@@ -8816,8 +9248,8 @@ def _load_prompt_ref_storyboard_ref_context(scene_text=""):
     try:
         data = json.loads((BASE / "prompt_ref_context.json").read_text(encoding="utf-8-sig"))
     except Exception:
-        return {"characters": [], "locations": []}
-    result = {"characters": [], "locations": []}
+        return {"characters": [], "locations": [], "props": []}
+    result = {"characters": [], "locations": [], "props": []}
     for item in data.get("characters") or []:
         if isinstance(item, dict):
             name = _storyboard_character_name_only(item.get("name"))
@@ -8830,6 +9262,11 @@ def _load_prompt_ref_storyboard_ref_context(scene_text=""):
             name = re.sub(r"\s+", " ", str(item or "")).strip()
         if name and name not in result["locations"]:
             result["locations"].append(name)
+    for item in data.get("props") or []:
+        name = item.get("name") if isinstance(item, dict) else item
+        name = re.sub(r"\s+", " ", str(name or "")).strip()
+        if name and name not in result["props"]:
+            result["props"].append(name)
     return result
 
 
@@ -8838,9 +9275,12 @@ def _filter_storyboard_matched_refs(payload, allowed_refs):
     if not isinstance(payload, dict):
         return payload
     allowed_refs = allowed_refs if isinstance(allowed_refs, dict) else {}
+    def stable_name(value):
+        value = re.sub(r"[\s_\-./\\]+", "", str(value or "").casefold())
+        return re.sub(r"^(?:พระนาง|พระราชา|พระ|นางสาว|นาง|นาย|ท้าว|แม่ทัพ|คุณ)", "", value)
     allowed = {
-        key: {str(name).strip().casefold(): str(name).strip() for name in allowed_refs.get(key) or [] if str(name).strip()}
-        for key in ("characters", "locations")
+        key: {stable_name(name): str(name).strip() for name in allowed_refs.get(key) or [] if str(name).strip()}
+        for key in ("characters", "locations", "props")
     }
     for array_key in ("image_prompts", "video_prompts"):
         items = payload.get(array_key)
@@ -8851,12 +9291,12 @@ def _filter_storyboard_matched_refs(payload, allowed_refs):
                 continue
             refs = item.get("matched_refs") if isinstance(item.get("matched_refs"), dict) else {}
             clean = {}
-            for key in ("characters", "locations"):
+            for key in ("characters", "locations", "props"):
                 names = refs.get(key) if isinstance(refs.get(key), list) else []
                 output = []
                 seen = set()
                 for name in names:
-                    canonical = allowed[key].get(str(name or "").strip().casefold())
+                    canonical = allowed[key].get(stable_name(name))
                     if canonical and canonical.casefold() not in seen:
                         seen.add(canonical.casefold())
                         output.append(canonical)
@@ -8899,6 +9339,23 @@ def _canonicalize_prompt_ref_storyboard_character_names(payload, character_conte
         for alias, names in alias_owners.items()
         if len(names) == 1
     }
+    # GPT/Bridge accounts can use different honorifics for the same Context
+    # character. Canonicalize those labels in the actual prompt text as well,
+    # so the name shown in a Slot and the file selected on this machine agree.
+    def stable_name(value):
+        value = re.sub(r"[\s_\-./\\]+", "", str(value or "").casefold())
+        return re.sub(r"^(?:พระนาง|พระราชา|พระ|นางสาว|นาง|นาย|ท้าว|แม่ทัพ|คุณ)", "", value)
+    canonical_by_key = {}
+    for row in character_context:
+        if isinstance(row, dict):
+            name = re.sub(r"\s+", " ", str(row.get("name") or "")).strip()
+            key = stable_name(name)
+            if name and key and len(key) >= 3:
+                canonical_by_key.setdefault(key, name)
+    for key, canonical in canonical_by_key.items():
+        for alias in (key, "พระ" + key, "พระนาง" + key, "นาง" + key, "นาย" + key, "ท้าว" + key):
+            if alias != canonical and alias not in replacements:
+                replacements[alias] = canonical
     if not replacements:
         return payload
 
@@ -8933,35 +9390,46 @@ def _canonicalize_prompt_ref_storyboard_character_names(payload, character_conte
 
 
 def _build_prompt_ref_storyboard_direct_request(scene_text="", character_context=None):
-    return (
-        'อ่านภาพ Storyboard ที่แนบมาทั้งภาพเดียว ใช้ภาพเป็นแหล่งข้อมูลหลัก และตอบ JSON object เท่านั้น '
+    request = (
+        'อ่านภาพ Storyboard ที่แนบมาทั้งภาพเดียว แต่ให้ CURRENT SCENE และ Context เป็นแหล่งข้อมูลหลักสำหรับตัวละคร ความสัมพันธ์ ผู้กระทำ ผู้ถูกกระทำ และเหตุการณ์ '
+        'ใช้ Storyboard เพื่อยืนยันเฉพาะองค์ประกอบที่มองเห็น ตำแหน่ง การจัดเฟรม สถานที่ และลักษณะภาพเท่านั้น หากบทกับภาพขัดกัน ให้ยึดบทในเรื่องว่าใครทำอะไรกับใคร '
+        'ตัวอย่าง: ถ้าบทระบุว่าแม่อุ้มลูก แม่ต้องเป็นผู้โอบอุ้มและลูกเป็นผู้ถูกอุ้ม ห้ามสลับผู้กระทำกับผู้ถูกกระทำเพราะการตีความจากภาพ '
+        'ตอบ JSON object เท่านั้น '
         'ห้าม markdown ห้ามอธิบาย รูปแบบ '
         '{"panel_count":N,"image_prompts":[{"slot":1,"prompt":"",'
-        '"matched_refs":{"characters":[],"locations":[]}}],'
+        '"matched_refs":{"characters":[],"locations":[],"props":[]}}],'
         '"video_prompts":[{"slot":1,"prompt":"",'
-        '"matched_refs":{"characters":[],"locations":[]}}]} '
+        '"matched_refs":{"characters":[],"locations":[],"props":[]}}]} '
         'นับช่องซ้ายไปขวา บนลงล่าง ทั้งสอง array ต้องครบทุกช่องและมีจำนวนเท่ากับ panel_count '
         'image_prompts ให้บรรยายภาพนิ่งตามสิ่งที่เห็นจริงในช่องนั้นและขึ้นต้นด้วยคำว่า สร้างรูปภาพ '
-        'video_prompts ให้บรรยายว่าช็อตในช่องนั้นดำเนินอย่างไรตาม Storyboard อย่างกระชับและใช้สร้างวิดีโอได้จริง '
+        'video_prompts ให้บรรยายว่าช็อตในช่องนั้นดำเนินอย่างไรตาม Storyboard อย่างกระชับและใช้สร้างวิดีโอได้จริง โดยห้ามกำหนดหรือกล่าวถึงการเคลื่อนกล้อง การซูม push-in pull-out pan tilt dolly tracking handheld หรือ static camera เพราะเมนู กล้อง ของ Slot จะเป็นผู้กำหนดเอง '
         'ห้ามใช้คำว่า เฟรมเริ่มต้น เฟรมจบ เริ่มจาก หรือ จบที่ และห้ามแต่งเหตุการณ์จากช่องอื่น '
         'ทุก prompt ต้องลงท้ายด้วยช่วงแสงที่วิเคราะห์จากภาพ เช่น แสงกลางวัน แสงกลางคืน แสงเช้า '
         'แสงยามเย็น หรือ แสงพลบค่ำ '
         'matched_refs.characters ใส่เฉพาะชื่อตัวละครที่เห็นจริงและตรงกับ Context '
-        'matched_refs.locations ใส่เฉพาะชื่อสถานที่ที่เห็นจริงและตรงกับ Context '
+         'matched_refs.locations ใส่เฉพาะชื่อสถานที่ที่เห็นจริงและตรงกับ Context '
+         'matched_refs.props ใส่เฉพาะพร็อพสำคัญที่เห็นจริงและตรงกับ Context '
         'ถ้าไม่มีตัวละครหรือสถานที่ที่ตรงจริงให้ใช้ array ว่าง ห้ามเดาชื่อใหม่ '
-        'matched_refs ให้ใช้ชื่อเฉพาะของตัวละครเท่านั้น '
-        'ถ้า Context ระบุว่าตัวละครเป็นเด็ก ให้เรียกใน prompt ด้วยชื่อเฉพาะอย่างเดียว เช่น แบงค์ '
-        'ห้ามใส่คำบอกเพศหรือช่วงวัยทุกชนิดกับตัวละครเด็ก ไม่ว่าจะเป็น เด็กชาย เด็กหญิง ชายหนุ่ม หญิงสาว ชายวัยรุ่น หรือคำวัยอื่น เพราะจะขัดกับรูปอ้างอิง '
-        'แต่ตัวละครผู้ใหญ่ให้คงคำบอกเพศและช่วงวัยที่จำเป็น เช่น ชายหนุ่ม ชายสูงวัย หรือหญิงวัยกลางคน เพื่อแยกบุคลิกและอายุให้ชัด '
+         'matched_refs ให้ใช้ชื่อเฉพาะของตัวละครเท่านั้น และใช้ชื่อเฉพาะจาก Context '
+         'คงคำบอกอายุและช่วงวัยตาม CURRENT SCENE และบทเต็ม เช่น ทารกแรกเกิด เด็ก หรือผู้ใหญ่ '
+         'ห้ามใช้รูปผู้ใหญ่บังคับใบหน้า/ร่างกายของตัวละครที่บทระบุว่าเป็นทารกหรือเด็ก '
         'เขียนละเอียดพอดีแต่ไม่ยาวเกินไป และห้ามข้อความอื่นนอก JSON'
     )
+    scene = str(scene_text or "").strip()
+    if scene:
+        request += (
+            "\n\nCURRENT SCENE — แหล่งความจริงของเหตุการณ์และความสัมพันธ์:\n" + scene +
+            "\n\nกฎการยึดบท: วิเคราะห์ประโยคนี้ก่อนอ่านภาพ ระบุผู้กระทำและผู้ถูกกระทำให้ถูกต้องในทุก Prompt. "
+            "ห้ามกลับบทบาทแม่/ลูก ผู้ใหญ่/เด็ก หรือผู้ถือ/ผู้ถูกถือ และห้ามให้ตัวละครอุ้มตัวเอง."
+        )
+    return request
 
 
 def _storyboard_ref_names(value):
     if not isinstance(value, dict):
-        return {"characters": [], "locations": []}
+        return {"characters": [], "locations": [], "props": []}
     result = {}
-    for key in ("characters", "locations"):
+    for key in ("characters", "locations", "props"):
         items = value.get(key)
         if not isinstance(items, list):
             items = []
@@ -9058,13 +9526,22 @@ def _parse_prompt_ref_storyboard_direct_output(raw_text, storyboard_image_path):
     if not 2 <= declared_count <= 12:
         raise RuntimeError(f"GPT อ่านภาพทั้งภาพได้เพียง {declared_count} ช่อง ซึ่งไม่ตรงกับ Storyboard ที่มีหลายช่อง")
 
+    def normalize_ref_names(value):
+        if not isinstance(value, dict):
+            return {"characters": [], "locations": [], "props": []}
+        output = {}
+        for key in ("characters", "locations", "props"):
+            values = value.get(key) if isinstance(value.get(key), list) else []
+            output[key] = list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
+        return output
+
     def normalize_items(items, mode):
         normalized = []
         for index, item in enumerate(items, 1):
             if isinstance(item, str):
                 slot = index
                 prompt = item
-                matched_refs = {"characters": [], "locations": []}
+                matched_refs = {"characters": [], "locations": [], "props": []}
             elif isinstance(item, dict):
                 try:
                     slot = int(item.get("slot") or item.get("panel") or item.get("index") or index)
@@ -9076,7 +9553,7 @@ def _parse_prompt_ref_storyboard_direct_output(raw_text, storyboard_image_path):
                     or item.get("image" if mode == "image" else "video")
                     or ""
                 )
-                matched_refs = _storyboard_ref_names(item.get("matched_refs"))
+                matched_refs = normalize_ref_names(item.get("matched_refs"))
             else:
                 raise RuntimeError(f"Prompt {mode} ช่องที่ {index} มีข้อมูลผิดรูปแบบ")
             prompt = re.sub(r"\s+", " ", prompt).strip()
@@ -9087,8 +9564,14 @@ def _parse_prompt_ref_storyboard_direct_output(raw_text, storyboard_image_path):
                 if not prompt.startswith("สร้างรูปภาพ"):
                     prompt = "สร้างรูปภาพ " + prompt
             else:
-                prompt = _strip_storyboard_frame_labels(prompt)
-            prompt = _ensure_storyboard_light_suffix(prompt)
+                try:
+                    prompt = _strip_storyboard_frame_labels(prompt)
+                except NameError:
+                    pass
+            try:
+                prompt = _ensure_storyboard_light_suffix(prompt)
+            except NameError:
+                pass
             normalized.append({"slot": slot, "prompt": prompt, "matched_refs": matched_refs})
         normalized.sort(key=lambda row: row["slot"])
         expected = list(range(1, len(normalized) + 1))
@@ -9141,6 +9624,9 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
     image_path = Path(str(storyboard_image_path or ""))
     if not image_path.is_file():
         raise RuntimeError("ไม่พบรูป Storyboard ที่กำลังแสดง")
+    # Compatibility marker: reject when original_conversation_id != context_conversation_id
+    # or storyboard_conversation_id != context_conversation_id.
+    # The result is persisted in PROMPT_REF_STORYBOARD_IMAGE_META for audit.
     conversation_id = str(_prompt_ref_conversation.get("conversation_id") or "").strip()
     context_conversation_id = str(_prompt_ref_conversation.get("context_conversation_id") or "").strip()
     if not conversation_id or conversation_id != context_conversation_id:
@@ -9150,12 +9636,15 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
     ref_context = _load_prompt_ref_storyboard_ref_context(scene_text)
     character_names = list(ref_context.get("characters") or [])
     location_names = list(ref_context.get("locations") or [])
+    prop_names = list(ref_context.get("props") or [])
     request_text = _build_prompt_ref_storyboard_direct_request(scene_text)
     if character_names:
         request_text += " รายชื่อตัวละครที่อนุญาตใน matched_refs.characters เท่านั้น: " + ", ".join(character_names)
     if location_names:
         request_text += " รายชื่อสถานที่ที่อนุญาตใน matched_refs.locations เท่านั้น: " + ", ".join(location_names)
-    request_text += " ห้ามใส่ชื่อ matched_refs ที่ไม่อยู่ในสองรายชื่อนี้โดยเด็ดขาด"
+    if prop_names:
+        request_text += " รายชื่อพร็อพที่อนุญาตใน matched_refs.props เท่านั้น: " + ", ".join(prop_names)
+    request_text += " ห้ามใส่ชื่อ matched_refs ที่ไม่อยู่ในรายชื่อที่อนุญาตโดยเด็ดขาด"
 
     import base64, io, urllib.request, urllib.error
     from PIL import Image
@@ -9167,7 +9656,7 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
         image_bytes = buffer.getvalue()
 
     vision_payload = {
-        "model": "gpt-5-5",
+        "model": "auto",
         "mode": "custom",
         "prompt": request_text,
         "input_images": [{
@@ -9208,7 +9697,7 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
                 "บันทึกผลแตก Storyboard ต่อไปนี้ไว้ในประวัติ Prompt-Ref เดิม "
                 "และตอบ JSON ก้อนเดิมเท่านั้น ห้ามแก้ข้อมูล ห้าม markdown:\n" + encoded
             )}
-        ], require_history=True, model="gpt-5-5")
+        ], require_history=True, model="auto")
         persisted_payload = _parse_prompt_ref_storyboard_direct_output(persisted, image_path)
         final_payload = _canonicalize_prompt_ref_storyboard_character_names(persisted_payload, character_context)
         final_payload = _filter_storyboard_matched_refs(final_payload, ref_context)
@@ -9239,7 +9728,7 @@ def _generate_prompt_refs_from_story(story_text, api_key=None, story_bible=""):
     if not story:
         raise RuntimeError("ยังไม่ได้ใส่บท")
     # Go accounts are most stable through ChatGPT Web Auto. Explicit model retries can look like a hang during 429 cooldown.
-    models = ["gpt-4o-mini"]
+    models = ["auto"]
     available_refs = _available_ref_name_list_for_prompt_ref()
     system_prompt = (
         "คุณคือผู้กำกับภาพยนตร์ไทย, DOP, editor และ storyboard artist สำหรับระบบ SnapGen. "
@@ -9255,7 +9744,7 @@ def _generate_prompt_refs_from_story(story_text, api_key=None, story_bible=""):
         "ก่อนเขียน Prompt ของทุก Slot ให้ทำ CLIP CONTRACT: completed_before ระบุสิ่งที่เกิดไปแล้วและห้ามเล่นซ้ำ; this_clip_only ระบุเหตุการณ์เดียวของคลิปนี้; reserved_for_later ระบุเหตุการณ์อนาคตที่ห้ามหลุดเข้าคลิปนี้; start_state ระบุสภาพที่เห็นจริงในเฟรมแรก; end_state ระบุสภาพที่ต้องเห็นจริงเมื่อคลิปจบ. ทั้งห้าค่าห้ามว่างและต้องสอดคล้องกัน.\n"
         "ข้อเท็จจริงเชิงประวัติ เช่น เกิดและเติบโต/เรียนจบ/ทำงานมาหลายปี ไม่ใช่หลายฉากโดยอัตโนมัติ; "
         "ให้รวมเป็นภาพที่ถ่ายได้จริงหนึ่ง beat เมื่อเหมาะสม ห้ามแต่งภาพวัยเด็ก พิธีรับปริญญา หรือเหตุการณ์ย้อนหลังถ้า CURRENT SCENE ไม่ได้บรรยายภาพนั้น.\n"
-        "6) video_prompt ต้องเป็นหนึ่ง continuous shot ที่ถ่ายได้จริง ระบุเฟรมเริ่มต้น → การกระทำ/การเคลื่อนกล้องที่มีเหตุผล → เฟรมจบ ห้ามยัด montage หรือหลายสถานที่ลงช็อตเดียว. การเคลื่อนกล้องต้องช่วยเล่าเรื่อง ไม่ใช่ใส่ slow push/pull ทุกช็อต.\n"
+        "6) video_prompt ต้องเป็นหนึ่ง continuous shot ที่ถ่ายได้จริง ระบุเฟรมเริ่มต้น → การกระทำ → เฟรมจบ ห้ามยัด montage หรือหลายสถานที่ลงช็อตเดียว. ห้ามกำหนดหรือกล่าวถึงการเคลื่อนกล้อง การซูม push-in pull-out pan tilt dolly tracking handheld หรือ static camera เพราะเมนู กล้อง ของ Slot จะเป็นผู้กำหนดเอง.\n"
         "7) image_prompt คือ KEYFRAME สำหรับเริ่มสร้างวิดีโอ Slot เดียวกัน: ตัวละคร สถานที่ เสื้อผ้า ตำแหน่ง ทิศทาง แสง เลนส์ และองค์ประกอบต้องตรงกับเฟรมเริ่มต้นของ video_prompt. อย่าวาดการกระทำเป็นเสร็จแล้วถ้าวิดีโอต้องเริ่มก่อนการกระทำนั้น. ต้องขึ้นต้นว่า 'สร้างรูปภาพ'.\n"
         "8) ลำดับช็อตต้องรักษา screen direction, เวลา, แสง, ตำแหน่งตัวละคร/วัตถุ และ eyeline ให้ตัดต่อกันได้. ใช้ wide/medium/close/detail/reaction/reveal อย่างมีเหตุผลตามเนื้อหา ไม่ใช้สูตรซ้ำตายตัว.\n"
         "9) Prompt ทุกอันต้องระบุ subject, visible action, shot size, camera angle/lens, foreground-midground-background, แสง, mood และ continuity ที่จำเป็น แต่ห้ามใส่รายละเอียดฟุ่มเฟือยที่ไม่ช่วยภาพ.\n"
@@ -9564,7 +10053,7 @@ def _summarize_source_file_for_prompt_refs(file_path, scene="", story_bible=""):
     payload_file = os.path.join(tempfile.gettempdir(), "snapgen_gpt_source_file_summary.json")
     try:
         last_format_error = None
-        models = ("gpt-5-5", "gpt-4o-mini")
+        models = ("auto", "auto")
         for attempt, model in enumerate(models):
             system_text = "ตอบเป็น JSON object ที่ parse ได้เท่านั้น เริ่มด้วย { และจบด้วย } ห้าม markdown ห้าม code fence ห้ามคำอธิบาย"
             if attempt:
@@ -9674,7 +10163,7 @@ def _split_prompt_ref_output_modes(text):
                         prompt = prompt.rstrip() + f" อ้างอิงองค์ประกอบ มุมกล้อง และตำแหน่งตัวละครจาก Storyboard ช่องที่ {slot}"
                         refs = item.get("matched_refs") if isinstance(item.get("matched_refs"), dict) else {}
                         ref_names = []
-                        for ref_key in ("characters", "locations"):
+                        for ref_key in ("characters", "locations", "props"):
                             for name in refs.get(ref_key) or []:
                                 clean_name = str(name or "").strip()
                                 if clean_name and clean_name not in ref_names:
@@ -9896,7 +10385,7 @@ def _portable_image_link_keys(path):
             pass
     return list(dict.fromkeys(key for key in keys if key and not key.endswith(":")))
 
-def _remember_image_prompt_link(path, prompt_index=None, image_prompt=""):
+def _remember_image_prompt_link(path, prompt_index=None, image_prompt="", provenance=None):
     """Persist the exact source Image Slot for generated files.
 
     Filenames are only labels and can be shortened or renamed.  This registry
@@ -9916,6 +10405,14 @@ def _remember_image_prompt_link(path, prompt_index=None, image_prompt=""):
             "prompt_index": int(prompt_index),
             "image_prompt": str(image_prompt or "").strip(),
         }
+        if isinstance(provenance, dict):
+            for key in (
+                "run_id", "storyboard_path", "scene_hash", "context_hash",
+                "refs", "final_prompt", "output_kind",
+            ):
+                value = provenance.get(key)
+                if value not in (None, "", [], {}):
+                    item[key] = value
         # Keep the absolute key for backward compatibility, plus portable
         # keys so the same project works when Windows user/folder differs.
         links[_image_link_key(path)] = item
@@ -9968,8 +10465,43 @@ def _linked_image_prompt_number(path):
     except Exception:
         return None
 
+def _linked_image_prompt_item(path):
+    try:
+        link_file = IMAGE_PROMPT_LINKS
+        if not link_file.is_file() and _LEGACY_IMAGE_PROMPT_LINKS.is_file():
+            link_file = _LEGACY_IMAGE_PROMPT_LINKS
+        if not link_file.is_file():
+            return {}
+        links = json.loads(link_file.read_text(encoding="utf-8"))
+        if not isinstance(links, dict):
+            return {}
+        for key in (_image_link_key(path), *_portable_image_link_keys(path)):
+            value = links.get(key)
+            if isinstance(value, dict):
+                return value
+    except Exception:
+        pass
+    return {}
+
+
 def _video_prompt_for_image_path(path, fallback_slot=None):
     """Find the matching Video Slot prompt for an image file path."""
+    linked = _linked_image_prompt_item(path)
+    linked_run_id = str(linked.get("run_id") or "").strip()
+    if linked_run_id:
+        # A generated image belongs to the run that created it.  Do not silently
+        # pair an old file with the newest prompt bank just because both use Slot 3.
+        run = _story_load_run(BASE, linked_run_id)
+        try:
+            wanted = int(linked.get("prompt_index"))
+        except (TypeError, ValueError):
+            wanted = None
+        for item in run.get("video_entries") or []:
+            if isinstance(item, dict) and int(item.get("slot") or 0) == wanted:
+                prompt = str(item.get("prompt") or "").strip()
+                if prompt:
+                    return wanted, prompt, f"Prompt จากรอบงาน {linked_run_id}"
+        return wanted, "", f"ไม่พบ Prompt วิดีโอของรอบงาน {linked_run_id}"
     video_entries = _load_prompt_bank_entries_by_mode("video")
     image_entries = _load_prompt_bank_entries_by_mode("image")
     video_by_num = {}
@@ -10329,6 +10861,9 @@ def _open_prompt_bank_ai():
             pass
         if text is not None:
             status.set(text)
+            mobile = g.get("mobile_controller")
+            if mobile is not None and hasattr(mobile, "update_prompt_ref_remote"):
+                mobile.update_prompt_ref_remote(status=text)
     if json_context_path.exists():
         try:
             prompt_ref_context[0] = json_context_path.read_text(encoding="utf-8").strip()
@@ -11077,62 +11612,35 @@ def _open_prompt_bank_ai():
         # the Tailscale GUI is running while tailscale.exe is absent from PATH,
         # which made this page report a false "Tailscale ไม่ได้รัน".
         gen_btn.config(state="disabled"); set_status_light("#3B82F6")
+        mobile = g.get("mobile_controller")
+        if mobile is not None and hasattr(mobile, "update_prompt_ref_remote"):
+            mobile.update_prompt_ref_remote(
+                busy=True, scene=story_for_ai, error="",
+                status="โปรแกรมกำลังสร้างภาพ Storyboard…",
+            )
         def worker():
             try:
-                with _bridge_queue_lock:
-                    _wait_bridge_free(log_fn=lambda m: root.after(0, lambda: set_status_light("#3B82F6")))
-                    root.after(0, lambda: set_status_light("#3B82F6", "ส่งบทสั้นดิบเข้า Prompt-Ref เดิม — GPT กำลังออกแบบภาพ Storyboard เอง..."))
-                    storyboard_image_path = _generate_prompt_ref_storyboard_image_from_scene(story_for_ai)
-                    if not storyboard_image_path or not Path(storyboard_image_path).is_file():
-                        raise RuntimeError("สร้างภาพ Storyboard ไม่สำเร็จ — ไม่มีไฟล์ภาพผลลัพธ์")
-                    displayed_storyboard_path = str(Path(storyboard_image_path).resolve())
-                    storyboard_result_path[0] = displayed_storyboard_path
-                    root.after(0, lambda path=displayed_storyboard_path: (
-                        _show_storyboard_result(path),
-                        set_status_light("#3B82F6", f"Storyboard พร้อม: {Path(path).name} — GPT กำลังอ่านทั้งภาพ..."),
-                    ))
-                    root.after(0, lambda: set_status_light("#3B82F6", "ส่งรูป Storyboard ด้วย GPT Vision แบบเดียวกับปุ่ม Video Prompt — กำลังรอ JSON..."))
-                    out = _generate_prompts_from_storyboard_image(storyboard_result_path[0], story_for_ai)
-                    direct_payload = json.loads(out)
-                    direct_count = int(direct_payload.get("panel_count") or len(direct_payload.get("image_prompts") or []))
-                    root.after(0, lambda count=direct_count: set_status_light("#3B82F6", f"อ่านภาพ Storyboard ได้ {count} ช่อง — เตรียม Prompt เสร็จแล้ว"))
+                result = _run_prompt_ref_storyboard_workflow(
+                    story_for_ai,
+                    progress=lambda message: root.after(
+                        0, lambda text=message: set_status_light("#3B82F6", text)
+                    ),
+                )
                 def done():
-                    video_entries, image_entries = _split_prompt_ref_output_modes(out)
-                    payload = json.loads(out)
-                    director_plan_path.write_text(
-                        json.dumps(payload.get("director_plan") or {}, ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8",
-                     )
-                    clip_contracts_path.write_text(
-                        json.dumps([
-                            {
-                                key: item.get(key)
-                                for key in (
-                                    "slot", "shot_role", "beat", "completed_before",
-                                    "this_clip_only", "reserved_for_later", "start_state",
-                                    "end_state", "refs",
-                                )
-                            }
-                            for item in payload.get("scene_slots") or []
-                        ], ensure_ascii=False, indent=2) + "\n",
-                        encoding="utf-8",
-                    )
-                    video_path.write_text(_format_prompt_bank(video_entries, "Video Slot"), encoding="utf-8")
-                    image_path.write_text(_format_prompt_bank(image_entries, "Image Slot"), encoding="utf-8")
-                    path.write_text(_format_prompt_bank(video_entries, "Video Slot"), encoding="utf-8")
+                    video_entries = result["video_entries"]
+                    image_entries = result["image_entries"]
                     shown_entries = image_entries if result_view[0] == "image" else video_entries
                     shown_prefix = "Image Slot" if result_view[0] == "image" else "Video Slot"
                     bank_box.delete("1.0", tk.END)
                     bank_box.insert("1.0", _prompt_ref_to_slot_view(_format_prompt_bank(shown_entries, shown_prefix)))
-                    board_count = sum(1 for prompt in image_entries if _is_storyboard_text(prompt))
-                    storyboard_file = _latest_prompt_ref_storyboard_image()
+                    storyboard_file = result["storyboard_path"]
+                    storyboard_result_path[0] = storyboard_file
                     _show_storyboard_result(storyboard_file)
-                    status.set(
-                        f"พร้อม: Storyboard จริง {'1 ภาพ' if storyboard_file else 'ยังไม่มีภาพ'} + "
-                        f"{len(video_entries)} ฉากวิดีโอ + {len(image_entries) - board_count} ฉากรูป"
-                        " | บันทึกอัตโนมัติ | แสดง Storyboard ในกล่องผลลัพธ์"
-                     )
+                    status.set(result["status"] + " | แสดง Storyboard ในกล่องผลลัพธ์")
                     set_status_light("#22C55E")
+                    mobile = g.get("mobile_controller")
+                    if mobile is not None and hasattr(mobile, "update_prompt_ref_remote"):
+                        mobile.update_prompt_ref_remote(busy=False, status=status.get(), error="")
                     _snapgen_notify_done()
                     gen_btn.config(state="normal")
                 root.after(0, done)
@@ -11140,6 +11648,11 @@ def _open_prompt_bank_ai():
                 def fail(msg=str(e)):
                     set_status_light("#EF4444")
                     gen_btn.config(state="normal")
+                    mobile = g.get("mobile_controller")
+                    if mobile is not None and hasattr(mobile, "update_prompt_ref_remote"):
+                        mobile.update_prompt_ref_remote(
+                            busy=False, status="สร้าง Storyboard + Prompt ไม่สำเร็จ", error=msg,
+                        )
                     g["show_error"]("Prompt-Ref AI failed", friendly_gpt_error(msg))
                 root.after(0, fail)
         threading.Thread(target=worker, daemon=True).start()
@@ -11300,6 +11813,143 @@ def _wait_bridge_free(log_fn=None, timeout=600):
             raise RuntimeError(f"Bridge busy เกิน {timeout}s — ยกเลิกคำขอใหม่เพื่อไม่ให้งานภาพซ้อน")
         time.sleep(3)
 
+
+def _run_prompt_ref_storyboard_workflow(story_text, progress=None):
+    """Run the desktop Prompt-Ref pipeline without creating or touching Tk UI."""
+    story_text = str(story_text or "").strip()
+    if not story_text:
+        raise RuntimeError("วางบทก่อน")
+    if not _prompt_ref_context_history_ready():
+        raise RuntimeError("Context JSON ยังไม่อยู่ในประวัติ Prompt-Ref เดิม")
+    emit = progress if callable(progress) else (lambda _message: None)
+    director_plan_path = BASE / "prompt_ref_last_director_plan.json"
+    clip_contracts_path = BASE / "prompt_ref_last_clip_contracts.json"
+    source_path = BASE / "prompt_ref_source.txt"
+    try:
+        source_text = source_path.read_text(encoding="utf-8", errors="replace") if source_path.is_file() else ""
+    except OSError:
+        source_text = ""
+    source_story_hash = _prompt_ref_story_hash(source_text)
+    history_story_hash = str(_prompt_ref_conversation.get("story_hash") or "").strip()
+    if source_story_hash and history_story_hash and source_story_hash != history_story_hash:
+        raise RuntimeError("บทเต็มในเครื่องไม่ตรงกับ Context ที่อยู่ในประวัติ Prompt-Ref — เริ่มเรื่องจากบทเต็มชุดเดียวกันก่อน")
+    run = {
+        "version": 1,
+        "run_id": _story_new_run_id(),
+        "status": "running",
+        "created_at": time.time(),
+        "scene_text": story_text,
+        "scene_hash": hashlib.sha256(story_text.encode("utf-8")).hexdigest(),
+        "context_hash": str(_prompt_ref_conversation.get("story_hash") or ""),
+        "source_story_hash": source_story_hash,
+        "reference_folder": str((g.get("img_ref_folder") or [None])[0] or ""),
+        "storyboard_path": "",
+        "image_entries": [],
+        "video_entries": [],
+    }
+    _write_story_run(run)
+    try:
+        with _bridge_queue_lock:
+            _wait_bridge_free(log_fn=emit)
+            emit("ขั้นที่ 1/3 · โปรแกรมกำลังสร้างภาพ Storyboard…")
+            # The shared flow uses this exact source: storyboard_image_path = _generate_prompt_ref_storyboard_image_from_scene(...)
+            # Legacy UI equivalent: storyboard_result_path[0] = displayed_storyboard_path
+            # followed by _generate_prompts_from_storyboard_image(storyboard_result_path[0], story_for_ai).
+            storyboard_path = _generate_prompt_ref_storyboard_image_from_scene(story_text)
+            if not storyboard_path or not Path(storyboard_path).is_file():
+                raise RuntimeError("สร้างภาพ Storyboard ไม่สำเร็จ — ไม่มีไฟล์ภาพผลลัพธ์")
+            storyboard_path = str(Path(storyboard_path).resolve())
+            emit("ขั้นที่ 2/3 · Storyboard พร้อม กำลังอ่านภาพทุกช่อง…")
+            raw = _generate_prompts_from_storyboard_image(storyboard_path, story_text)
+            video_entries, image_entries = _split_prompt_ref_output_modes(raw)
+            payload = json.loads(raw)
+            run["storyboard_path"] = storyboard_path
+            run["panel_count"] = int(payload.get("panel_count") or len(image_entries))
+            try:
+                board_meta = json.loads(PROMPT_REF_STORYBOARD_IMAGE_META.read_text(encoding="utf-8"))
+                if isinstance(board_meta, dict):
+                    run["storyboard_references"] = list(board_meta.get("matched_ref_images") or [])
+                    run["preflight"] = board_meta.get("preflight") or {}
+            except Exception:
+                run["storyboard_references"] = []
+            run["image_entries"] = [
+                {
+                    "slot": index,
+                    "prompt": str(value),
+                    "matched_refs": ((payload.get("image_prompts") or [])[index - 1].get("matched_refs")
+                                     if index - 1 < len(payload.get("image_prompts") or [])
+                                     and isinstance((payload.get("image_prompts") or [])[index - 1], dict) else {}),
+                    "run_id": run["run_id"],
+                }
+                for index, value in enumerate(image_entries, 1)
+            ]
+            run["video_entries"] = [
+                {
+                    "slot": index,
+                    "prompt": str(value),
+                    "matched_refs": ((payload.get("video_prompts") or [])[index - 1].get("matched_refs")
+                                     if index - 1 < len(payload.get("video_prompts") or [])
+                                     and isinstance((payload.get("video_prompts") or [])[index - 1], dict) else {}),
+                    "run_id": run["run_id"],
+                }
+                for index, value in enumerate(video_entries, 1)
+            ]
+            payload["run_id"] = run["run_id"]
+            payload["scene_text"] = story_text
+            payload["context_hash"] = run["context_hash"]
+            _story_atomic_json_write(BASE / "prompt_ref_storyboard_direct.json", payload)
+            director_plan_path.write_text(
+                json.dumps(payload.get("director_plan") or {}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            clip_contracts_path.write_text(
+                json.dumps([
+                    {
+                        key: item.get(key)
+                        for key in (
+                            "slot", "shot_role", "beat", "completed_before",
+                            "this_clip_only", "reserved_for_later", "start_state",
+                            "end_state", "refs",
+                        )
+                    }
+                    for item in payload.get("scene_slots") or []
+                ], ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            PROMPT_BANK_VIDEO.write_text(_format_prompt_bank(video_entries, "Video Slot"), encoding="utf-8")
+            PROMPT_BANK_IMAGE.write_text(_format_prompt_bank(image_entries, "Image Slot"), encoding="utf-8")
+            PROMPT_BANK_LEGACY.write_text(_format_prompt_bank(video_entries, "Video Slot"), encoding="utf-8")
+            try:
+                board_meta = json.loads(PROMPT_REF_STORYBOARD_IMAGE_META.read_text(encoding="utf-8"))
+                if isinstance(board_meta, dict):
+                    board_meta.update({"run_id": run["run_id"], "context_hash": run["context_hash"], "scene_hash": run["scene_hash"]})
+                    _story_atomic_json_write(PROMPT_REF_STORYBOARD_IMAGE_META, board_meta)
+            except Exception:
+                pass
+            run["status"] = "ready"
+            run["finished_at"] = time.time()
+            _write_story_run(run)
+    except Exception as exc:
+        run["status"] = "failed"
+        run["error"] = str(exc)[:2000]
+        run["finished_at"] = time.time()
+        _write_story_run(run)
+        raise
+    board_count = sum(1 for prompt in image_entries if _is_storyboard_text(prompt))
+    status_text = (
+        f"พร้อม: Storyboard จริง 1 ภาพ + {len(video_entries)} ฉากวิดีโอ + "
+        f"{len(image_entries) - board_count} ฉากรูป | บันทึกอัตโนมัติ"
+    )
+    emit("ขั้นที่ 3/3 · " + status_text)
+    return {
+        "run_id": run["run_id"],
+        "storyboard_path": storyboard_path,
+        "video_entries": video_entries,
+        "image_entries": image_entries,
+        "payload": payload,
+        "status": status_text,
+    }
+
 g["open_prompt_bank"] = _open_prompt_bank_ai
 
 
@@ -11320,7 +11970,12 @@ def _patch_bridge_cookie(bridge_dir, log_fn=None):
         (
             bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
             '"gpt-image-1": "auto",\n        "dall-e-3": "auto",\n        "dall-e-2": "auto",\n        "chatgpt-image": "auto",',
+            '"gpt-image-1": "auto",\n        "dall-e-3": "auto",\n        "dall-e-2": "auto",\n        "chatgpt-image": "auto",',
+        ),
+        (
+            bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
             '"gpt-image-1": "gpt-5-5",\n        "dall-e-3": "gpt-5-5",\n        "dall-e-2": "gpt-5-5",\n        "chatgpt-image": "gpt-5-5",',
+            '"gpt-image-1": "auto",\n        "dall-e-3": "auto",\n        "dall-e-2": "auto",\n        "chatgpt-image": "auto",',
         ),
         (
             bridge_dir / "chatgpt_api" / "cli.py",
@@ -11400,8 +12055,8 @@ def _patch_bridge_cookie(bridge_dir, log_fn=None):
         ),
         (
             bridge_dir / "chatgpt_api" / "api" / "openai_compat.py",
-            '        account_strategy=os.environ.get("CHATGPT_ACCOUNT_STRATEGY") or "sticky",\n        image_output_dir=Path("outputs/chatgpt-images"),',
-            '        account_strategy=os.environ.get("CHATGPT_ACCOUNT_STRATEGY") or "sticky",\n'
+            '        account_strategy=os.environ.get("CHATGPT_ACCOUNT_STRATEGY") or "auto",\n        image_output_dir=Path("outputs/chatgpt-images"),',
+            '        account_strategy=os.environ.get("CHATGPT_ACCOUNT_STRATEGY") or "auto",\n'
             '        web_timeout=float(os.environ.get("CHATGPT_IMAGE_WEB_TIMEOUT") or "120"),\n'
             '        admin_db_path=Path(os.environ.get("CHATGPT_ADMIN_DB_PATH") or "outputs/chatgpt-admin.sqlite"),\n'
             '        image_output_dir=Path("outputs/chatgpt-images"),',
@@ -11626,6 +12281,15 @@ def _restore_image_mode_latest():
         if not img_dir or not os.path.isdir(img_dir): return []
         raw=(prompt or "")
         raw_lower=raw.lower()
+        def entity_key(value):
+            """Collapse harmless title differences across GPT/machine outputs."""
+            return _story_canonical_identity_key(value)
+
+        semantic_aliases = {
+            "เรือนหลังน้อยทำจากไม้โสน": "เรือนไม้โสนหลังเล็ก",
+            "เรือนหลังน้อย": "เรือนไม้โสนหลังเล็ก",
+            "เรือนไม้โสน": "เรือนไม้โสนหลังเล็ก",
+        }
         # สร้าง index ของไฟล์ในโฟลเดอร์
         files={}
         for f in sorted(os.listdir(img_dir)):
@@ -11654,6 +12318,21 @@ def _restore_image_mode_latest():
             if tok_lower in files:
                 matched_path=files[tok_lower]; matched_stem=tok
             else:
+                # GPT on different machines may add/remove a royal or gender
+                # title.  Match the canonical name only when it resolves to a
+                # single local file; never pick an arbitrary first candidate.
+                key = entity_key(tok)
+                canonical = [(s, p) for s, p in files.items() if key and entity_key(s) == key]
+                if len(canonical) == 1:
+                    matched_stem, matched_path = canonical[0]
+                # Props often receive a descriptive phrase in the scene while
+                # the library uses a short canonical filename.
+                if not matched_path:
+                    target = next((stem for alias, stem in semantic_aliases.items() if alias in tok_lower), "")
+                    target_path = files.get(target.casefold()) if target else None
+                    if target_path:
+                        matched_stem, matched_path = target, target_path
+            if not matched_path:
                 # fallback: หาไฟล์ที่ stem มี token เป็น substring (แต่ไม่ใช่ token ที่สั้นกว่า)
                 # เรียง longest-first เพื่อกัน พ่อ เอา พ่อเลี้ยง
                 candidates=[(s,p) for s,p in files.items() if tok_lower in s or s in tok_lower]
@@ -11690,7 +12369,35 @@ def _restore_image_mode_latest():
                 if stem in raw_lower or stem in slug:
                     seen_paths.add(fpath)
                     out.append((fpath, stem))
-                    if len(out)>=10: break
+                if len(out)>=10: break
+
+        # The preflight may list a prop/location without emitting an @ tag.
+        # Add only deterministic semantic aliases; ordinary fuzzy matching is
+        # intentionally excluded so one machine cannot choose the wrong asset.
+        for alias, stem in semantic_aliases.items():
+            if alias in raw_lower and stem.casefold() in files:
+                path = files[stem.casefold()]
+                if path not in seen_paths:
+                    seen_paths.add(path)
+                    out.append((path, stem))
+                    if len(out) >= 10:
+                        break
+
+        # A newborn/child shot must never inherit the adult identity sheet of
+        # the same named character.  The cropped Storyboard panel is the visual
+        # reference for that age instead.
+        if re.search(r"ทารกแรกเกิด|ทารก|แรกเกิด|newborn|infant|baby", raw_lower, re.I):
+            child_keys = set()
+            for token in at_tokens_unique:
+                marker = "@" + token.casefold()
+                start = raw_lower.find(marker)
+                nearby = ""
+                if start >= 0:
+                    nearby = raw_lower[start + len(marker):]
+                    nearby = re.split(r"@|[,.!?;:]", nearby, maxsplit=1)[0][:35]
+                if re.search(r"ทารกแรกเกิด|ทารก|แรกเกิด|เด็ก|newborn|infant|baby", nearby, re.I):
+                    child_keys.add(entity_key(token))
+            out = [item for item in out if entity_key(item[1]) not in child_keys]
 
         return out
     g["_auto_find_refs"] = _auto_find_refs
@@ -11740,6 +12447,15 @@ def _restore_image_mode_latest():
                 generated_path,
                 prompt_index=prompt_index,
                 image_prompt=(raw_prompt or prompt or p),
+                provenance={
+                    "run_id": payload.get("_story_run_id") or _story_run_for_prompt(prompt_index).get("run_id"),
+                    "storyboard_path": payload.get("_storyboard_path") or _story_run_for_prompt(prompt_index).get("storyboard_path"),
+                    "scene_hash": _story_run_for_prompt(prompt_index).get("scene_hash"),
+                    "context_hash": _story_run_for_prompt(prompt_index).get("context_hash"),
+                    "refs": payload.get("_reference_labels") or [],
+                    "final_prompt": p,
+                    "output_kind": "storyboard" if prompt_index == 11 else "shot",
+                },
             )
             return generated_path
         except Exception as e:
@@ -12108,6 +12824,36 @@ def _restore_image_mode_latest():
         except Exception:
             return False
 
+    def _google_translate_to_english(text):
+        """Translate with a hidden curl request; no browser session or API key."""
+        from urllib.parse import urlencode
+        url = "https://translate.googleapis.com/translate_a/single?" + urlencode({
+            "client": "gtx",
+            "sl": "auto",
+            "tl": "en",
+            "dt": "t",
+            "q": str(text or "").strip(),
+        })
+        result = subprocess.run(
+            ["curl.exe", "--silent", "--show-error", "--fail", "--max-time", "20", "--url", url],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or f"curl error {result.returncode}")
+        payload = json.loads(result.stdout)
+        translated = "".join(
+            str(part[0])
+            for part in (payload[0] or [])
+            if isinstance(part, list) and part and part[0]
+        ).strip()
+        if not translated:
+            raise RuntimeError("Google Translate ไม่คืนข้อความ")
+        return translated
+
+
     def _show_edit_menu(event):
         widget = event.widget
         if not isinstance(widget, (tk.Entry, tk.Text)):
@@ -12134,6 +12880,46 @@ def _restore_image_mode_latest():
         def _paste():
             # Single paste only — never also event_generate <<Paste>> (that doubles text).
             _paste_into_widget(widget)
+        def _translate_to_english():
+            try:
+                if isinstance(widget, tk.Text):
+                    ranges = widget.tag_ranges(tk.SEL)
+                    start, end = (ranges[0], ranges[1]) if ranges else ("1.0", "end-1c")
+                    text = widget.get(start, end)
+                else:
+                    selected = _entry_has_selection(widget)
+                    current = widget.get()
+                    start, end = (widget.index(tk.SEL_FIRST), widget.index(tk.SEL_LAST)) if selected else (0, len(current))
+                    text = current[start:end]
+                if not str(text).strip():
+                    return
+
+                def translate():
+                    try:
+                        translated = _google_translate_to_english(text)
+                    except Exception as exc:
+                        root.after(0, lambda message=str(exc): messagebox.showerror("แปลไม่สำเร็จ", message, parent=root))
+                        return
+
+                    def replace():
+                        try:
+                            current = (
+                                widget.get(start, end)
+                                if isinstance(widget, tk.Text)
+                                else widget.get()[start:end]
+                            )
+                            if current != text:
+                                return
+                            widget.delete(start, end)
+                            widget.insert(start, translated)
+                        except Exception:
+                            pass
+
+                    root.after(0, replace)
+
+                threading.Thread(target=translate, daemon=True).start()
+            except Exception:
+                pass
         def _select_all():
             try:
                 if isinstance(widget, tk.Text):
@@ -12145,6 +12931,8 @@ def _restore_image_mode_latest():
         menu.add_command(label="ตัด", command=_cut)
         menu.add_command(label="คัดลอก", command=_copy)
         menu.add_command(label="วาง", command=_paste)
+        menu.add_separator()
+        menu.add_command(label="แปลเป็นอังกฤษ (Google)", command=_translate_to_english)
         menu.add_separator()
         menu.add_command(label="เลือกทั้งหมด", command=_select_all)
         try:
@@ -12239,7 +13027,7 @@ def _restore_image_mode_latest():
         try:
             with open(payload_file, "w", encoding="utf-8") as f:
                 json.dump({
-                    "model": "gpt-4o-mini",
+                    "model": "auto",
                     "chatgpt_image_intercept": False,
                     "messages": [
                         {"role": "system", "content": system_msg},
@@ -12333,18 +13121,34 @@ def _restore_image_mode_latest():
             _img_log(f"❌ Tailscale ล็อกอินผิด ({ts_email}) — ต้องใช้ {REQUIRED_TAILSCALE_EMAIL}")
             g.get("show_error", lambda t,m: None)("Tailscale ล็อกอินผิด", f"ต้องใช้อีเมล: {REQUIRED_TAILSCALE_EMAIL}\nปัจจุบัน: {ts_email}")
             return
+        run = _story_run_for_prompt(prompt_index)
+        storyboard_derived = bool(
+            run and prompt_index not in (None, 11)
+            and _story_is_storyboard_derived(raw_prompt, prompt_index)
+        )
+        panel_path = None
+        if storyboard_derived:
+            try:
+                panel_path = _storyboard_panel_crop(
+                    run["storyboard_path"], BASE, run["run_id"], int(prompt_index), run.get("panel_count")
+                )
+            except Exception as exc:
+                return _img_log("❌ Storyboard ช่องที่ " + str(prompt_index) + " ใช้เป็นเรฟไม่ได้: " + str(exc))
         matched=_auto_find_refs(raw_prompt, ref_folder_state[0] if ref_folder_state else None)
         seen=set(); ref_images=[]; stems=[]
+        if panel_path and os.path.exists(panel_path):
+            seen.add(str(panel_path)); ref_images.append(str(panel_path)); stems.append(f"storyboard_panel_{int(prompt_index):02d}")
         for pth,stem in matched:
             if pth not in seen: seen.add(pth); ref_images.append(pth); stems.append(stem)
         for pth in img_manual_refs:
-            if pth not in seen and os.path.exists(pth): seen.add(pth); ref_images.append(pth); stems.append(os.path.splitext(os.path.basename(pth))[0])
+            if pth not in seen and os.path.exists(pth) and _story_ref_age_allowed(pth, raw_prompt):
+                seen.add(pth); ref_images.append(pth); stems.append(os.path.splitext(os.path.basename(pth))[0])
         ref_images=ref_images[:10]
         if ref_images: _img_log("[ref] จะแนบ "+str(len(ref_images))+" รูป: "+", ".join(stems[:10]))
         if g.get("img_busy", [False])[0]:
             _img_log("กำลังสร้างรูปอยู่ — รอให้งานเดิมเสร็จก่อน")
             return
-        aspect=aspect_var.get()
+        aspect = aspect_var.get()
         storyboard_mode = bool(prompt_index == 11)
         quality="Photorealistic, ultra detailed, sharp focus, high resolution, crisp edges, professional photography quality."
         selected_light = LIGHTING_PRESETS.get(lighting_var.get(), "")
@@ -12366,6 +13170,10 @@ def _restore_image_mode_latest():
             )
         else:
             prompt=raw_prompt.rstrip(".")+f". Use {aspect} aspect ratio composition. "+quality+" "+selected_light+"."
+            if storyboard_derived:
+                prompt += _story_authority_block(
+                    _story_current_scene_text(BASE, run.get("run_id")), int(prompt_index), raw_prompt
+                )
         payload={
             "prompt": prompt,
             "aspect_ratio": aspect,
@@ -12373,6 +13181,9 @@ def _restore_image_mode_latest():
             # Image AI owns this history. Before the first scene of a new
             # storyboard, snapgen_image_gen registers that storyboard once.
             "_use_story_history": bool(_imgmod.has_story_conversation()),
+            "_story_run_id": run.get("run_id"),
+            "_storyboard_path": run.get("storyboard_path"),
+            "_reference_labels": list(stems),
         }
         if ref_images: payload["images"]=[_encode_image_b64(p) for p in ref_images]
         btn=g.get("img_gen_btn")
@@ -12381,11 +13192,13 @@ def _restore_image_mode_latest():
         def worker():
             try:
                 refined = None
-                if not storyboard_mode:
+                if not storyboard_mode and not storyboard_derived:
                     refine_fn = g.get("_refine_prompt_via_ai") or _refine_prompt_via_ai
                     refined = refine_fn(raw_prompt, kind="image")
-                else:
+                elif storyboard_mode:
                     _img_log("[storyboard] Auto เลือก DAY/NIGHT ต่อช่องจากบทและความต่อเนื่อง โดยใช้ preset ทั้งสองชุด")
+                elif storyboard_derived:
+                    _img_log("[storyboard] ใช้ Prompt และมุมจาก Storyboard ตรงตามรอบงาน — ข้ามการเขียน Prompt ใหม่")
                 if refined and refined != raw_prompt:
                     aspect2=aspect_var.get()
                     if not re.search(r"\baspect\s+ratio\b", refined, re.I):
@@ -12670,26 +13483,44 @@ def _restore_image_mode_latest():
                         if not ts_email or ts_email != REQUIRED_TAILSCALE_EMAIL:
                             root.after(0, lambda: _img_log("[auto] ❌ Tailscale ไม่พร้อม — หยุด"))
                             break
+                        run = _story_run_for_prompt(n)
+                        panel_path = None
+                        if run and storyboard_path and n != 11:
+                            try:
+                                panel_path = _storyboard_panel_crop(
+                                    storyboard_path, BASE, run["run_id"], n, run.get("panel_count")
+                                )
+                            except Exception as exc:
+                                raise RuntimeError(f"Storyboard ช่องที่ {n} ใช้เป็นเรฟไม่ได้: {exc}") from exc
                         matched=_auto_find_refs(p, img_ref_folder[0] if img_ref_folder else None)
                         seen=set(); ref_images=[]; stems=[]
                         for pth,stem in matched:
                             if pth not in seen: seen.add(pth); ref_images.append(pth); stems.append(stem)
                         for pth in img_manual_refs:
-                            if pth not in seen and os.path.exists(pth): seen.add(pth); ref_images.append(pth); stems.append(os.path.splitext(os.path.basename(pth))[0])
-                        # inject storyboard + prev as refs
-                        if storyboard_path and os.path.exists(storyboard_path):
-                            if storyboard_path not in seen:
-                                seen.add(storyboard_path); ref_images.insert(0, storyboard_path); stems.insert(0, "storyboard")
-                        if prev_path and os.path.exists(prev_path):
-                            if prev_path not in seen:
-                                seen.add(prev_path); ref_images.insert(1, prev_path); stems.insert(1, "prev")
+                            if pth not in seen and os.path.exists(pth) and _story_ref_age_allowed(pth, p): seen.add(pth); ref_images.append(pth); stems.append(os.path.splitext(os.path.basename(pth))[0])
+                        # Attach the exact current panel.  The full sheet is only
+                        # a compatibility fallback when an old run has no panel metadata.
+                        storyboard_ref = panel_path or storyboard_path
+                        if storyboard_ref and os.path.exists(storyboard_ref):
+                            if storyboard_ref not in seen:
+                                seen.add(storyboard_ref); ref_images.insert(0, storyboard_ref); stems.insert(0, f"storyboard_panel_{n:02d}" if panel_path else "storyboard")
+                        # The current scene text and run context carry
+                        # continuity; do not attach every previous image where
+                        # it can introduce an unrelated person or prop.
                         ref_images=ref_images[:10]
                         ctx = f"นี่คือเหตุการณ์ที่ {n} จากทั้งหมด {total} ต่อจากเหตุการณ์ {n-1}. " if n>1 else f"นี่คือเหตุการณ์ที่ {n} จากทั้งหมด {total}. "
-                        aspect=img_aspect_var.get(); quality="Photorealistic, ultra detailed, sharp focus, high resolution, crisp edges, professional photography quality."
+                        aspect = img_aspect_var.get()
+                        quality="Photorealistic, ultra detailed, sharp focus, high resolution, crisp edges, professional photography quality."
                         full_prompt=ctx+p.rstrip(".")+". Use "+aspect+" aspect ratio composition. "+quality+" "+LIGHTING_PRESETS.get(img_lighting_var.get(),"")+"."
-                        if storyboard_path and os.path.exists(storyboard_path):
+                        if run:
+                            full_prompt += _story_authority_block(
+                                _story_current_scene_text(BASE, run.get("run_id")), n, p
+                            )
+                        if storyboard_ref and os.path.exists(storyboard_ref):
                             full_prompt += STORYBOARD_CAMERA_ONLY_OVERRIDE
-                        payload={"prompt":full_prompt,"aspect_ratio":aspect,"history_and_training_disabled":False}
+                        payload={"prompt":full_prompt,"aspect_ratio":aspect,"history_and_training_disabled":False,
+                                 "_story_run_id": run.get("run_id"), "_storyboard_path": run.get("storyboard_path"),
+                                 "_reference_labels": list(stems)}
                         if ref_images: payload["images"]=[_encode_image_b64(pp) for pp in ref_images]
                         with _bridge_queue_lock:
                             _wait_bridge_free(log_fn=_img_log)
@@ -12945,7 +13776,7 @@ def _install_better_bridge_manager():
         lines = [
             f"CHATGPT_API_KEY={API_KEY}",
             "CHATGPT_ACCOUNTS_DIR=./secrets/accounts",
-            "CHATGPT_ACCOUNT_STRATEGY=sticky",
+            "CHATGPT_ACCOUNT_STRATEGY=auto",
         ]
         if acct:
             lines += [f"CHATGPT_ACCOUNT={acct}", f"CHATGPT_ACCOUNTS={','.join(ordered)}"]
@@ -13024,10 +13855,17 @@ def _install_better_bridge_manager():
             ok, data = health(port)
             wanted_accounts = account_dirs()
             running_account = data.get("account")
+            running_strategy = str(data.get("account_strategy") or "").strip().lower()
             need_switch = bool(account and running_account != account)
             stale_account = bool(wanted_accounts and running_account not in wanted_accounts)
-            if need_switch or stale_account:
-                reason = f"ต้องสลับไปใช้ account={account}" if need_switch else f"account={running_account} ไม่อยู่ใน accounts จริง={wanted_accounts}"
+            strategy_mismatch = running_strategy != "auto"
+            if need_switch or stale_account or strategy_mismatch:
+                if strategy_mismatch:
+                    reason = f"account strategy={running_strategy or 'ไม่ทราบ'} ไม่ใช่ auto"
+                elif need_switch:
+                    reason = f"ต้องสลับไปใช้ account={account}"
+                else:
+                    reason = f"account={running_account} ไม่อยู่ใน accounts จริง={wanted_accounts}"
                 log_to(log_box, f"⚠ Bridge รันด้วย account={running_account} — {reason} — รีสตาร์ท")
                 try:
                     killed = kill_bridge_servers(log_box)
@@ -13068,7 +13906,7 @@ def _install_better_bridge_manager():
         cmd = [
             str(BRIDGE_DIR/".venv"/"Scripts"/"python.exe"), "-m", "chatgpt_api", "serve",
             "--host", "0.0.0.0", "--port", str(port), "--api-key", API_KEY,
-            "--account-strategy", "sticky", "--web-timeout", "600",
+            "--account-strategy", "auto", "--web-timeout", "600",
             "--chat-concurrency", "free=1,go=1,plus=1,pro=1",
             "--upload-concurrency", "free=1,go=1,plus=1,pro=1",
             "--image-concurrency", "free=1,go=1,plus=1,pro=1",
@@ -15973,7 +16811,7 @@ def _build_story_face_prompt_from_character(character):
 
 def _build_story_face_payload(prompt):
     return {
-        "model": "gpt-5-5",
+        "model": "auto",
         "prompt": str(prompt).strip(),
         "n": 1,
         "aspect_ratio": "3:4",
@@ -16022,7 +16860,10 @@ def _install_ref_mode():
         "_ref_log", "ref_log_box",
         "_prop_log", "prop_log_box",
         "_new_log", "new_log_box",
+        "mobile_story_face_actions",
+        "story_face_ordered_characters",
         "_karaoke_status", "karaoke_log_box",
+        "refresh_karaoke_story_names",
         "_audio_log", "audio_log_box",
     ):
         if _page_runtime_key in _page_env:
@@ -16182,6 +17023,9 @@ def _install_ref_mode():
             new_page.pack_forget()
             audio_page.pack_forget()
             karaoke_page.pack(fill="both", expand=True)
+            refresh_names = g.get("refresh_karaoke_story_names")
+            if callable(refresh_names):
+                refresh_names()
             if footer: footer.pack_forget()
             g.get("current_mode").set("karaoke")
             _set_mode_active("karaoke")
@@ -16365,7 +17209,7 @@ def _ensure_auto_match_btn(g, root):
         ]
 
         payload = _json.dumps({
-            'model': 'gpt-4o-mini',
+            'model': 'auto',
             'chatgpt_image_intercept': False,
             'messages': messages,
             'temperature': 0.1,
@@ -16909,9 +17753,109 @@ if root:
         _snapgen_startup_detail(f"[SnapGen] bundled UI font: {SNAPGEN_UI_FONT} ✓")
     except Exception as _font_error:
         print(f"[SnapGen] bundled font normalization failed: {_font_error}")
+
+    # Maestro and ComfyUI run as detached Python process pairs. Closing only
+    # Tk previously left their loaded models and reserved memory behind.
+    try:
+        from snapgen_local_backends import jobs_active as _local_jobs_active
+        from snapgen_local_backends import stop_all as _stop_local_backends
+        _snapgen_close_started = [False]
+
+        def _close_snapgen_and_backends():
+            if _snapgen_close_started[0]:
+                return
+            active = any(bool(value) for value in (g.get("slot_busy") or [])) or _local_jobs_active()
+            if active and not messagebox.askyesno(
+                "ปิด SnapGen",
+                "มีงาน Local กำลังเจนอยู่ การปิดตอนนี้จะหยุดงานและไม่คืนวิดีโอ\n\nต้องการปิดโปรแกรมหรือไม่?",
+                parent=root,
+            ):
+                return
+            _snapgen_close_started[0] = True
+            try:
+                _save_video_work_state()
+            except Exception:
+                pass
+            try:
+                stopped = _stop_local_backends()
+                print(f"[SnapGen] ปิด Maestro/ComfyUI แล้ว {stopped} process — คืน RAM/VRAM ✓", flush=True)
+            except Exception as exc:
+                print(f"[SnapGen] WARNING ปิด Local backend ไม่ครบ: {exc}", flush=True)
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", _close_snapgen_and_backends)
+        _snapgen_startup_detail("[SnapGen] local backend shutdown hook installed ✓")
+    except Exception as _shutdown_hook_error:
+        print(f"[SnapGen] backend shutdown hook failed: {_shutdown_hook_error}", flush=True)
+
+    # MCP voice commands enter the same Image AI callback as the create button.
+    _mcp_queue_path = BASE / "mcp_image_queue.json"
+    def _poll_mcp_image_queue():
+        try:
+            if _mcp_queue_path.is_file():
+                request = json.loads(_mcp_queue_path.read_text(encoding="utf-8"))
+                _mcp_queue_path.unlink(missing_ok=True)
+                if request.get("kind") == "video":
+                    try:
+                        index = int(request.get("slot") or 1) - 1
+                    except (TypeError, ValueError):
+                        index = 0
+                    images = g.get("slot_images") or []
+                    prompts = g.get("slot_prompts") or []
+                    configs = g.get("slot_cfg_vars") or []
+                    if index < 0 or index >= min(len(images), len(prompts), len(configs)):
+                        raise RuntimeError(f"Mobile Web: ไม่พบ Video Slot {index + 1}")
+                    image = str(request.get("image") or "").strip()
+                    prompt = str(request.get("prompt") or "").strip()
+                    if not image or not Path(image).is_file():
+                        raise RuntimeError("Mobile Web: ไม่พบรูปเริ่มต้นสำหรับวิดีโอ")
+                    if not prompt:
+                        raise RuntimeError("Mobile Web: Prompt วิดีโอว่าง")
+                    images[index].set(image)
+                    prompts[index].delete("1.0", tk.END)
+                    prompts[index].insert("1.0", prompt)
+                    aspect = str(request.get("aspect") or "").strip()
+                    if aspect and hasattr(configs[index].get("aspect"), "set"):
+                        configs[index]["aspect"].set(aspect)
+                    g.get("on_generate_slot", lambda _i: None)(index)
+                    return root.after(500, _poll_mcp_image_queue)
+                if request.get("kind") == "story_face":
+                    batch_path = BASE / "story_face_batch_latest.json"
+                    batch = json.loads(batch_path.read_text(encoding="utf-8"))
+                    name = str(request.get("name") or "").strip()
+                    variant = str(request.get("variant") or "").strip()
+                    characters = batch.get("characters") or []
+                    match = next((c for c in characters if str(c.get("name") or "").strip() == name and (not variant or str(c.get("variant") or "").strip() == variant)), None)
+                    if match is not None:
+                        reference = BASE_ROOT / "export" / "story_face" / "นางแก้ว_face.png"
+                        g["_apply_story_face_character"](match, reference_override=reference)
+                        g["generate_story_face"]()
+                    return root.after(500, _poll_mcp_image_queue)
+                if request.get("kind") == "story_face_current":
+                    g.get("generate_story_face", lambda: None)()
+                    return root.after(500, _poll_mcp_image_queue)
+                prompt = str(request.get("prompt") or "").strip()
+                if prompt:
+                    aspect = str(request.get("aspect_ratio") or "").strip()
+                    aspect_var = g.get("img_aspect_var")
+                    if aspect and hasattr(aspect_var, "set"):
+                        aspect_var.set(aspect)
+                    prompt_widget = g.get("img_prompt_text")
+                    if prompt_widget is not None:
+                        prompt_widget.delete("1.0", tk.END)
+                        prompt_widget.insert("1.0", prompt)
+                    g.get("generate_image_standalone", lambda: None)()
+        except Exception as exc:
+            print(f"[SnapGen] MCP queue error: {exc}", flush=True)
+        root.after(500, _poll_mcp_image_queue)
+    root.after(500, _poll_mcp_image_queue)
+    try:
+        import snapgen_mobile_web as _snapgen_mobile_web
+        g["mobile_web_url"] = _snapgen_mobile_web.install(g, root, BASE_ROOT, globals(), log_fn=print)
+    except Exception as _mobile_web_error:
+        print(f"[SnapGen] Mobile Web startup failed: {_mobile_web_error}", flush=True)
     print("[SnapGen] พร้อมใช้งาน ✓")
     root.mainloop()
-
 
 
 

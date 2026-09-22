@@ -11,4 +11,4 @@ cd SnapGen
 setup_and_run.bat
 ```
 
-อ่านรายละเอียดเพิ่มเติมที่ `docs/RECOVERY_FROM_GITHUB.md`
+อ่านรายละเอียดเพิ่มเติมที่ `RECOVERY_FROM_GITHUB.md`

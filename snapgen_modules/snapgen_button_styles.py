@@ -14,6 +14,9 @@ from __future__ import annotations
 import tkinter as tk
 from dataclasses import dataclass
 from typing import Callable
+from snapgen_fonts import font_family as _snapgen_font_family
+
+SNAPGEN_UI_FONT = _snapgen_font_family()
 
 
 @dataclass(frozen=True)
@@ -32,7 +35,7 @@ class STYLE:
     MODE_ACTIVE = ButtonStyle("#6B7280", "#FFFFFF", "#4B5563", "#FFFFFF")
 
     # ── Action buttons ─────────────────────────────────────────────────
-    PRIMARY = ButtonStyle("#6D28D9", "white", "#7C3AED")       # สร้าง, แปลง, generate
+    PRIMARY = ButtonStyle("#059669", "white", "#10B981")       # สร้าง, แปลง, generate
     SECONDARY = ButtonStyle("#2563EB", "white", "#1D4ED8")     # Select, Copy
     DANGER = ButtonStyle("#DC2626", "white", "#B91C1C")        # Clear, ล้าง, delete
     AUTO = ButtonStyle("#0EA5E9", "white", "#0284C7")          # ⚡ Auto
@@ -40,9 +43,12 @@ class STYLE:
     NEUTRAL = ButtonStyle("#64748B", "white", "#475569")       # Diff, misc
     SUCCESS = ButtonStyle("#4CAF50", "white", "#388E3C")       # Save
     CONTEXT = ButtonStyle("#795548", "white", "#5D4037")       # Context, สรุปบท
+    # Reserved only for starting/changing a GPT history on every page.
+    # Do not reuse this light blue for Select, Auto, attach, or other actions.
+    HISTORY = ButtonStyle("#EFF6FF", "#315A75", "#DBEAFE", "#315A75")
 
     # ── Aliases for backward compatibility ────────────────────────────
-    PURPLE = PRIMARY
+    PURPLE = ButtonStyle("#6D28D9", "white", "#7C3AED")
     BLUE = SECONDARY
     RED = DANGER
     CYAN = AUTO
@@ -53,13 +59,24 @@ class STYLE:
 
 
 # ── Shared button geometry ──────────────────────────────────────────────
+# PAGE ACTION CONTRACT: every main action button on every SnapGen page uses
+# these values. Do not add page-local width/padding unless the control is an
+# intentionally compact utility (X, mic, Slot, arrow, or gallery-card button).
 DEFAULT_PADX = 14
 DEFAULT_PADY = 7
-DEFAULT_FONT = ("Leelawadee UI", 9, "bold")
+DEFAULT_FONT = (SNAPGEN_UI_FONT, 9, "bold")
 DEFAULT_WIDTH = 14
 DEFAULT_HEIGHT = 1
 DEFAULT_RELIEF = "flat"
 DEFAULT_BD = 0
+
+# TOP MODE TAB CONTRACT: every page tab uses identical geometry and spacing.
+# Text length must never decide one tab's size. New pages use this same style.
+MODE_WIDTH = 13
+MODE_HEIGHT = 1
+MODE_PADX = 10
+MODE_PADY = 8
+MODE_PACK_PADX = 4
 
 
 def make_button(
@@ -117,10 +134,13 @@ def style_mode_button(btn: tk.Button, active: bool = False) -> None:
             bg=s.bg, fg=s.fg,
             activebackground=s.active_bg, activeforeground=s.active_fg,
             relief="flat", bd=0, borderwidth=0,
-            padx=18, pady=8,
-            font=("Leelawadee UI", 10, "bold"),
+            width=MODE_WIDTH, height=MODE_HEIGHT,
+            padx=MODE_PADX, pady=MODE_PADY,
+            font=(SNAPGEN_UI_FONT, 10, "bold"),
             cursor="hand2", highlightthickness=0,
             overrelief="flat",
         )
+        if btn.winfo_manager() == "pack":
+            btn.pack_configure(padx=MODE_PACK_PADX)
     except Exception:
         pass

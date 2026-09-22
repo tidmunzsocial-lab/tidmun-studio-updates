@@ -16,10 +16,6 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import ttk as _ttk
 from snapgen_fonts import font_family as _snapgen_font_family
-from snapgen_character_wardrobe import wardrobe_prompt_text
-from snapgen_character_ref_request import character_prompt_text, save_debug_snapshot
-from snapgen_character_visual_bible import canonicalize_context, find_character
-from snapgen_prompt_ref_visual_normalization import install_prompt_ref_visual_normalization
 
 SNAPGEN_UI_FONT = _snapgen_font_family()
 from snapgen_page_builder import (
@@ -33,65 +29,23 @@ from snapgen_button_styles import STYLE
 
 
 def is_explicit_ghost_character(name, entity):
-    """Return True only when THIS entity is explicitly supernatural.
-
-    Mentions such as "ผู้พบเห็นเหตุการณ์แมวผี", "กลัวผี", or "ถูกผีหลอก"
-    describe the story around a normal character and must never convert that
-    character into a ghost reference.
-    """
-    import re as _re
-
-    # Story Breakdown v4 is authoritative. Do not reinterpret its semantic type
-    # from words inside role/description. Fallback logic below is only for old v3 data.
+    """Detect explicit supernatural identity, ignoring negative constraints."""
+    values = [str(name or "")]
     if isinstance(entity, dict):
-        entity_type = str(entity.get("entity_type") or entity.get("type") or "").strip().casefold()
-        if entity_type in {"human", "animal", "animal_group"}:
-            return False
-        if entity_type in {"supernatural_entity", "supernatural_unknown", "ghost", "spirit"}:
-            return True
-
-    ghost_words = (
-        "ผี", "วิญญาณ", "ภูต", "ปีศาจ", "อมนุษย์",
-        "ghost", "spirit", "specter", "spectre",
-    )
-    supernatural_phrases = ("สิ่งเหนือธรรมชาติ", "supernatural entity")
-
-    entity_name = str(name or "").strip().casefold()
-    # A supernatural identity stated directly in the entity name is explicit,
-    # e.g. ผีโพง, แมวผี, วิญญาณหญิง, ปีศาจ.
-    if any(word in entity_name for word in ghost_words):
-        return True
-    if any(phrase in entity_name for phrase in supernatural_phrases):
-        return True
-
-    if not isinstance(entity, dict):
-        return False
-
-    # Only identity-bearing fields are allowed to classify the entity.  Do not
-    # use assumptions, must_include, skin/hair/eyes/clothes: those can contain
-    # scene descriptions or words about another creature.
-    role = str(entity.get("บทบาท") or "").strip().casefold()
-    identity = str(entity.get("visual_identity") or "").strip().casefold()
-    traits = str(entity.get("ลักษณะเด่น") or "").strip().casefold()
-
-    # Explicit identity forms.  Requiring identity grammar prevents incidental
-    # phrases like "ผู้พบเห็นเหตุการณ์แมวผี" from becoming a ghost match.
-    strong_texts = (role, identity, traits)
-    explicit_patterns = (
-        r"^(?:เป็น\s*)?(?:ผี|วิญญาณ|ภูต|ปีศาจ|อมนุษย์)(?:\b|ที่|ชนิด|ตน|ตัว)",
-        r"^(?:เป็น\s*)?สิ่งเหนือธรรมชาติ(?:\b|ที่|ชนิด|ตน|ตัว)",
-        r"(?:เป็น|คือ|มีตัวตนเป็น|ตัวจริงเป็น|身份เป็น)\s*(?:ผี|วิญญาณ|ภูต|ปีศาจ|อมนุษย์)",
-        r"(?:เป็น|คือ|มีตัวตนเป็น|ตัวจริงเป็น)\s*สิ่งเหนือธรรมชาติ",
-        r"^(?:ghost|spirit|specter|spectre|supernatural entity)\b",
-        r"\b(?:is|as)\s+(?:a\s+)?(?:ghost|spirit|specter|spectre|supernatural entity)\b",
-    )
-    for text in strong_texts:
-        if not text:
-            continue
-        if any(_re.search(pattern, text, flags=_re.I) for pattern in explicit_patterns):
-            return True
-
-    return False
+        for key in (
+            "บทบาท", "visual_identity", "ลักษณะเด่น", "สีผิว", "ทรงผม",
+            "ใบหน้า", "ดวงตา", "เสื้อผ้า", "must_include", "assumptions",
+        ):
+            value = entity.get(key)
+            if isinstance(value, list):
+                values.extend(str(item) for item in value)
+            elif value is not None:
+                values.append(str(value))
+    text = " ".join(values).strip().casefold()
+    return any(word in text for word in (
+        "ผี", "วิญญาณ", "ภูต", "ปีศาจ", "อมนุษย์", "เหนือธรรมชาติ",
+        "ghost", "spirit", "specter", "spectre", "supernatural entity",
+    ))
 
 
 GHOST_CINEMATIC_HORROR_EFFECTS = (
@@ -125,7 +79,6 @@ def build_ref_edit_prompt(comment, ghost=True):
 def install(g: dict, root: tk.Misc) -> tk.Misc:
     """Build this page and return its root frame."""
     globals().update(g)
-    install_prompt_ref_visual_normalization(g)
     lock_g = {"_selection_locks": {}, "_selection_lock_vars": []}
     export_ref_dir = g.get("EXPORT_REF", BASE / "ref")
     ref_page = tk.Frame(root, bg="#FAFAF7")
@@ -329,8 +282,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             for key in (
                 "อายุ", "เพศ", "บทบาท", "รูปร่าง", "ส่วนสูง", "สีผิว",
                 "ทรงผม", "ใบหน้า", "ดวงตา", "ดวงต", "เสื้อผ้า",
-                "visual_identity", "ลักษณะเด่น", "อาชีพ", "ฐานะ", "nationality_or_ethnicity",
-                "wardrobe", "wardrobe_source", "wardrobe_reason", "must_include",
+                "visual_identity", "ลักษณะเด่น", "must_include",
                 "must_not_include", "assumptions",
             ):
                 value = item.get(key)
@@ -343,9 +295,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             import json as _json
             data = _json.loads(context_text)
             if isinstance(data, dict):
-                canonical = canonicalize_context(data)
-                if canonical.get("characters"):
-                    return canonical["characters"]
+                for item in data.get("characters", []) or data.get("ตัวละคร", []) or []:
+                    add_character(item)
+                if characters:
+                    return characters
         except Exception:
             pass
 
@@ -476,18 +429,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             add_place(name, detail)
         try:
             locked_items = []
-            location_bible = _load_location_bible()
-            # Only use cached targets if they belong to the current context.
-            # targets_hash is sha256(context+source); context_hash is sha256(context).
-            # Use context_hash as a fast check since we have context_text here.
-            current_ctx_hash = _location_context_hash(context_text)
-            bible_ctx_hash = location_bible.get("context_hash") or ""
-            bible_targets_hash = location_bible.get("targets_hash") or ""
-            # Accept if either hash matches (context_hash is subset, targets_hash is superset).
-            hash_ok = bible_ctx_hash == current_ctx_hash or bible_targets_hash.startswith(current_ctx_hash[:8])
-            if not hash_ok:
-                raise RuntimeError("location bible belongs to a different story — skip")
-            for target in (location_bible.get("targets") or []):
+            for target in (_load_location_bible().get("targets") or []):
                 if isinstance(target, dict):
                     parent = str(target.get("parent_location") or "").strip()
                     fact = str(target.get("story_fact") or "").strip()
@@ -609,8 +551,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         "กำหนดชุดเอง",
     )
     outfit_frame = tk.Frame(box, bg="#FAFAF7")
-    # Story-only workflow: wardrobe is automatic; keep legacy state internal but hide manual wardrobe controls.
-    ref_outfit_var.set("อัตโนมัติตามเนื้อเรื่อง")
+    outfit_frame.pack(fill="x", pady=(0, 6))
     _form_label(outfit_frame, "ชุด:")
     outfit_combo_box = tk.Frame(
         outfit_frame, width=FORM_FIELD_WIDTH, height=FORM_FIELD_HEIGHT, bg="#FAFAF7"
@@ -760,7 +701,6 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     tk.Button(ref_attach_controls, text="📋 วางรูป", command=_paste_ref_attach, bg="#475569", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=(0, 4))
     tk.Button(ref_attach_controls, text="📎 เลือกไฟล์", command=_choose_ref_attach, bg="#475569", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
     tk.Button(ref_attach_controls, text="ล้าง", command=_clear_ref_attach, bg="#DC2626", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
-    tk.Button(ref_attach_controls, text="🧹 ล้างรูป", command=lambda: g.get("clear_ref_gallery")() if callable(g.get("clear_ref_gallery")) else None, bg="#DC2626", fg="white", relief="flat", padx=12, pady=6, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
 
     def _install_ref_image_drop():
         try:
@@ -907,10 +847,10 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         _rg_bind_wheel(_w)
 
     def _normalize_ref_output(path, name):
-        """Add a small deterministic name badge at the lower-left corner.
+        """Enforce Ref sheet layout after image generation.
 
-        Do not crop, resize, rearrange, or add a full-width strip. The generated
-        horizontal reference-sheet composition must remain untouched.
+        Preserve generated five-panel layout and add one deterministic name
+        strip. Never crop/rearrange panels here; layout belongs to the prompt.
         """
         source = Path(str(path or ""))
         if not source.is_file():
@@ -919,14 +859,18 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             from PIL import Image, ImageDraw, ImageFont, PngImagePlugin
 
             with Image.open(source) as opened:
-                if opened.info.get("snapgen_ref_layout") == "v3_horizontal_corner_label":
+                if opened.info.get("snapgen_ref_layout") == "v2":
                     return str(source)
                 image = opened.convert("RGB")
             width, height = image.size
-            if width < 400 or height < 250:
+            if width < 400 or height < 400:
                 return str(source)
 
-            canvas = image.copy()
+            strip_h = max(54, round(height * 0.06))
+            content_h = height - strip_h
+            canvas = Image.new("RGB", (width, height), "#F3F4F6")
+            canvas.paste(image.resize((width, content_h), Image.Resampling.LANCZOS), (0, 0))
+
             draw = ImageDraw.Draw(canvas)
             font = None
             for font_path in (
@@ -936,39 +880,30 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             ):
                 if font_path.is_file():
                     try:
-                        font = ImageFont.truetype(str(font_path), max(18, round(height * 0.032)))
+                        font = ImageFont.truetype(str(font_path), max(18, round(height * 0.028)))
                         break
                     except Exception:
                         pass
             if font is None:
                 font = ImageFont.load_default()
-
             label = " ".join(str(name or "").split()).strip() or source.stem
             label = f"ชื่อ: {label}"
             bbox = draw.textbbox((0, 0), label, font=font)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-            pad_x = max(12, round(width * 0.010))
-            pad_y = max(8, round(height * 0.010))
-            margin = max(12, round(min(width, height) * 0.018))
-            x0 = margin
-            y0 = height - margin - text_h - pad_y * 2
-            x1 = x0 + text_w + pad_x * 2
-            y1 = height - margin
-            draw.rectangle((x0, y0, x1, y1), fill="#F3F4F6", outline="#D1D5DB", width=max(1, round(height * 0.002)))
-            draw.text((x0 + pad_x, y0 + pad_y - bbox[1]), label, fill="#111827", font=font)
+            x = max(12, (width - (bbox[2] - bbox[0])) // 2)
+            y = content_h + max(4, (strip_h - (bbox[3] - bbox[1])) // 2)
+            draw.text((x, y), label, fill="#374151", font=font)
 
             temp = source.with_suffix(source.suffix + ".refnorm.tmp")
             if source.suffix.lower() == ".png":
                 metadata = PngImagePlugin.PngInfo()
-                metadata.add_text("snapgen_ref_layout", "v3_horizontal_corner_label")
+                metadata.add_text("snapgen_ref_layout", "v2")
                 canvas.save(temp, format="PNG", pnginfo=metadata)
             else:
                 canvas.save(temp, format="PNG")
             os.replace(str(temp), str(source))
             return str(source)
         except Exception as exc:
-            _ref_log(f"[Ref layout] ใส่ป้ายชื่อมุมล่างไม่สำเร็จ ใช้รูปเดิม: {exc}")
+            _ref_log(f"[Ref layout] จัดสัดส่วน/ป้ายชื่อไม่สำเร็จ ใช้รูปเดิม: {exc}")
             return str(path)
 
     def _ref_gallery_add(path, prepend=True, is_ghost=False, persist=True):
@@ -1019,7 +954,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         raise RuntimeError("ไม่พบตัวเข้ารหัสรูป")
                     prompt = build_ref_edit_prompt(comment, ghost=is_ghost)
                     payload = {
-                        "model": "gpt-5-5", "prompt": prompt, "n": 1,
+                        "model": "auto", "prompt": prompt, "n": 1,
                         "aspect_ratio": "1:1", "history_and_training_disabled": False,
                         "images": [encoder(p)], "_use_ref_story_history": True,
                     }
@@ -1139,7 +1074,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return ". ".join(parts)
     
     def _context_entity(name, requested_kind=""):
-        """Bind Ref to one canonical character by character_id or exact name; never by array index."""
+        """Return the matching entity plus film-level context from Prompt Context."""
         import json as _json
         raw = _load_ref_context()
         try:
@@ -1148,24 +1083,35 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             data = {}
         if not isinstance(data, dict):
             return requested_kind, {}, {}
+        wanted = str(name or "").strip().casefold()
         kind = str(requested_kind or "").strip().lower()
-        story = data.get("story") if isinstance(data.get("story"), dict) else {}
+        found = {}
         if kind != "location":
-            canonical = canonicalize_context(data)
-            found = find_character(canonical, name)
-            if found:
-                return "character", found, story
-        if kind != "character":
-            wanted = str(name or "").strip().casefold()
+            for item in data.get("characters", []) or []:
+                if isinstance(item, dict) and str(item.get("name", "")).strip().casefold() == wanted:
+                    found = item
+                    kind = "character"
+                    break
+        if not found and kind != "character":
             pools = []
             pools.extend(data.get("locations", []) or [])
             pools.extend(data.get("scene_map", []) or [])
+            story = data.get("story") if isinstance(data.get("story"), dict) else {}
             pools.extend(story.get("key_places", []) or [])
             for item in pools:
                 item_name = (item.get("name") or item.get("place") or item.get("location")) if isinstance(item, dict) else item
                 if str(item_name or "").strip().casefold() == wanted:
-                    return "location", (item if isinstance(item, dict) else {"name": item_name}), story
-        return kind, {}, story
+                    found = item if isinstance(item, dict) else {"name": item_name}
+                    kind = "location"
+                    break
+        story = data.get("story") if isinstance(data.get("story"), dict) else {}
+        film = {
+            "summary": str(story.get("summary") or "").strip(),
+            "era": str(story.get("era") or "").strip(),
+            "main_location": str(story.get("main_location") or "").strip(),
+        }
+        return kind, found, film
+
     def _useful_context_fields(entity, fields):
         rows = []
         for key, label in fields:
@@ -1182,8 +1128,40 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return clipped.rsplit(" ", 1)[0].rstrip(" ,;")
 
     def _character_outfit_instruction(entity, film):
-        """Return one story-derived wardrobe lock; no user wardrobe input required."""
-        return wardrobe_prompt_text(entity if isinstance(entity, dict) else {}, film if isinstance(film, dict) else {})
+        """Return clothing-only direction without changing identity traits."""
+        mode = str(ref_outfit_var.get() or "อัตโนมัติตามเนื้อเรื่อง").strip()
+        presets = {
+            "ชุดอยู่บ้าน": (
+                "ชุดอยู่บ้านธรรมดาที่เหมาะกับวัย ฐานะ ยุค และอากาศของเรื่อง "
+                "ห้ามใส่ยูนิฟอร์มหรือชุดทำงานเพียงเพราะตัวละครมีอาชีพ"
+            ),
+            "ชุดทำงาน": "ชุดทำงานที่ตรงกับอาชีพ สถานที่ทำงาน ยุค และฐานะของตัวละคร",
+            "ชุดลำลองออกนอกบ้าน": "ชุดลำลองออกนอกบ้านที่เหมาะกับวัย ยุค สถานที่ และสภาพอากาศ",
+            "ชุดนอน": "ชุดนอนหรือชุดพักผ่อนในบ้านที่เรียบง่าย เหมาะกับวัย ยุค และฐานะ",
+            "ชุดสุภาพ/ทางการ": "ชุดสุภาพหรือชุดทางการที่เหมาะกับวัย ยุค ฐานะ และวัฒนธรรมของเรื่อง",
+        }
+        if mode == "กำหนดชุดเอง":
+            custom = " ".join(ref_custom_outfit_var.get().split()).strip()
+            return f"ใส่ชุดตามนี้เท่านั้น: {custom}" if custom else "ชุดธรรมดาเรียบง่าย ไม่ใช่ยูนิฟอร์ม"
+        if mode in presets:
+            return presets[mode]
+
+        context_clothes = str(entity.get("เสื้อผ้า") or entity.get("clothes") or "").strip() if isinstance(entity, dict) else ""
+        story_hint = str(film.get("summary") or "").strip() if isinstance(film, dict) else ""
+        if story_hint:
+            story_hint = _clip_ref_prompt(story_hint, 120)
+            clothes_hint = ""
+            if context_clothes and context_clothes not in ("ไม่ระบุ", "null", "None"):
+                clothes_hint = f"; ข้อมูลชุดเดิมคือ {context_clothes} ใช้ได้เฉพาะเมื่อเข้ากับสถานการณ์หลัก"
+            return (
+                f"เลือกชุดที่ตัวละครใช้ในสถานการณ์หลักของเรื่องนี้: {story_hint}; "
+                "อาชีพเป็นเพียงข้อมูลพื้นหลัง ห้ามใช้ชุดทำงานถ้าเหตุการณ์หลักไม่ได้อยู่ที่ทำงาน"
+                f"{clothes_hint}"
+            )
+        if context_clothes and context_clothes not in ("ไม่ระบุ", "null", "None"):
+            return f"เลือกชุดหลักจาก Context: {context_clothes}"
+        return "ชุดธรรมดาที่เหมาะกับสถานการณ์หลักของตัวละคร ไม่อนุมานยูนิฟอร์มจากอาชีพ"
+
     def _outfit_name_hint(name, kind):
         if str(kind or "").lower() == "location":
             return name
@@ -1266,7 +1244,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             json.dumps(context, ensure_ascii=False, indent=2)[:12000]
         )
         payload = {
-            "model": "gpt-4o-mini",
+            "model": "auto",
             "chatgpt_image_intercept": False,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -1450,7 +1428,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         try:
             with open(payload_file, "w", encoding="utf-8") as f:
                 _json.dump({
-                    "model": "gpt-4o-mini",
+                    "model": "auto",
                     "chatgpt_image_intercept": False,
                     "messages": [
                         {"role": "system", "content": system_prompt},
@@ -1541,7 +1519,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         try:
             with open(payload_file, "w", encoding="utf-8") as f:
                 _json.dump({
-                    "model": "gpt-4o-mini", "chatgpt_image_intercept": False,
+                    "model": "auto", "chatgpt_image_intercept": False,
                     "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
                     "temperature": 0.1,
                 }, f, ensure_ascii=False)
@@ -1627,11 +1605,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 "REFERENCE SHEET LOCK: พื้นหลังขาวล้วนทุกช่อง ใช้ bright high-key studio แสงขาวนุ่มสม่ำเสมอ เห็นผม ใบหน้า เสื้อผ้า และรูปร่างครบชัดเจน. ห้ามพื้นดำ โทนมืด ฉากกลางคืน หมอก ควัน วิวสถานที่ และ dramatic low-key lighting. "
                 "HORROR CREATURE LOCK: ทำเป็นตัวร้ายหนังผีไทยที่มีจุดขายทางกายภาพ 2-3 จุดเด่น เห็นชัดและจำได้ทันทีทุกมุม แม้อยู่บนพื้นขาว. จุดขายต้องอยู่ที่ใบหน้า ดวงตา ปาก ผิว สัดส่วน ท่าทาง หรือเครื่องหมายเฉพาะชนิดผี ไม่ใช่แค่คนแก่สกปรกและไม่ใช่แค่แสงเรืองที่จมูก. "
                 "ZOMBIE-SKIN LOCK: ใช้เฉพาะลักษณะผิวศพซอมบี้ที่สมจริงกับผีตัวเดิม—ผิวซีดเทาอมเขียวไร้เลือด ด่างเป็นหย่อม แห้งกร้านคล้ายหนัง เส้นเลือดคล้ำใต้ผิว รอยแตกลายละเอียด เบ้าตาและแก้มยุบ สีผิวตายไม่สม่ำเสมอ. ต้องเห็นลักษณะนี้ชัดทั้งใบหน้า คอ แขน และขา. ห้ามให้เป็นเพียงริ้วรอยคนแก่ ห้ามแผลเปิด เนื้อฉีก และ gore. "
-                "MANDATORY COMPOSITION: สร้าง Ref แนวนอน 16:9 แบบ EXACTLY 3 visible depictions เรียงซ้ายไปขวาในแถวเดียว: (1) FRONT FACE head-and-shoulders portrait หน้าตรงมองกล้อง, (2) THREE-QUARTER VIEW head-and-shoulders portrait หันประมาณ 45 องศา เห็นใบหน้าชัด, (3) FULL-BODY FRONT VIEW ยืนตรง เห็นศีรษะถึงเท้าครบ. รูปเต็มตัวต้องอยู่ขวาสุดและมองเห็นครบชัดเจน. "
-                "ทั้ง 3 ต้องเป็นตัวเดียวกัน หน้าเดียวกัน ทรงผมเดียวกัน ชุดเดียวกัน และลักษณะเหนือธรรมชาติเดียวกัน. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ, ห้ามหัวเรื่อง กล่องข้อมูล AGE HEIGHT ROLE PERSONALITY NOTE label color swatch หรือข้อความใดๆ เพราะโปรแกรมเติมชื่อเอง. "
+                "จัดเป็นแผ่นอ้างอิง 5 ช่อง. แถวบนมี 4 ช่องเล็กเท่ากันเรียงซ้ายไปขวา: ใบหน้า close-up ด้านซ้าย, ใบหน้า close-up ด้านขวา, เต็มตัวด้านหน้า, เต็มตัวด้านหลัง. "
+                "แถวล่างมี 1 ช่องใหญ่เป็นใบหน้าตรง close-up ระยะหัวถึงไหล่ ให้ใบหน้าตรงเป็นภาพหลักและใหญ่ที่สุด เห็นตา จมูก ปาก ผม และเครื่องหมายจำเพาะชัด. ภาพเต็มตัวต้องเห็นศีรษะถึงเท้าครบแต่มีขนาดเล็กกว่าหน้าตรง. "
                 f"ล็อกตัวตนจากเรื่อง: {identity}. งานวิเคราะห์คติและรูปลักษณ์ก่อนสร้าง: {ghost_source}. "
                 "ห้ามทำเป็นผีชุดขาวทั่วไป ห้ามเปลี่ยนชนิดผี และต้องเห็นเครื่องหมายจำเพาะชัดทุกมุม. ผลลัพธ์ต้องดูเป็นผีอย่างชัดเจนแม้อยู่บนพื้นขาว ห้ามออกมาเป็นเพียงมนุษย์แก่หรือมนุษย์สกปรก. "
-                "ห้ามสร้างหัวเรื่อง NOTE คำอธิบาย หรือตัวอักษรยาวภายในภาพ เพราะโปรแกรมจะเติมป้ายชื่อมุมล่างภายหลัง. "
+                "ห้ามสร้างหัวเรื่อง ป้ายชื่อ NOTE คำอธิบาย หรือตัวอักษรใดๆ ภายในภาพ เพราะโปรแกรมจะเติมป้ายชื่อภายหลัง. "
                 "ทุกช่องเป็นคนเดียวกัน ใบหน้า อายุ เสื้อผ้า รูปร่าง และลักษณะเหนือธรรมชาติตรงกัน. "
                 f"{GHOST_CINEMATIC_HORROR_EFFECTS}. "
                 "photorealistic Thai supernatural character reference, pure white background, no text, no watermark.",
@@ -1644,10 +1622,14 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             if outfit_mode != "อัตโนมัติตามเนื้อเรื่อง":
                 outfit_text = f" เปลี่ยนเฉพาะเสื้อผ้าตามคำสั่งนี้: {_character_outfit_instruction({}, {})}."
             return _clip_ref_prompt(
-                f"สร้าง SUBJECT REFERENCE IMAGE แนวนอน 16:9 ของ '{name}' จากชื่อที่ผู้ใช้พิมพ์เท่านั้น. "
-                "MANDATORY COMPOSITION: ต้องมี EXACTLY 3 visible depictions เท่านั้น เรียงซ้ายไปขวาแถวเดียว: (1) FRONT FACE head-and-shoulders portrait หน้าตรง, (2) THREE-QUARTER VIEW head-and-shoulders portrait หันประมาณ 45 องศา, (3) FULL-BODY FRONT VIEW ยืนตรง เห็นศีรษะถึงเท้าครบ. รูปเต็มตัวต้องอยู่ขวาสุดและห้ามหายหรือถูกตัดเท้า. "
-                "ทั้ง 3 ต้องเป็นตัวเดียวกัน รูปลักษณ์เดียวกันและชุดเดียวกัน. ห้าม side profile 90 degree, ห้ามหันหลัง, ห้ามภาพที่ 4, ห้ามชุดหลายแบบ, ห้ามหัวเรื่อง AGE HEIGHT ROLE PERSONALITY NOTE label color swatch info box หรือข้อความใดๆ เพราะโปรแกรมเติมชื่อเอง. "
-                f"{outfit_text} พื้นหลังขาวหรือเทาอ่อนเรียบ แสง ID-photo สม่ำเสมอ photorealistic, sharp, no watermark."
+                f"สร้าง SUBJECT REFERENCE SHEET ของ '{name}' จากชื่อที่ผู้ใช้พิมพ์เท่านั้น ห้ามใช้ข้อมูลจาก Prompt Context หรือเนื้อเรื่อง. "
+                "LIGHTING LOCK: flat frontal ID-photo lighting, large camera-front softbox plus equal 1:1 fill from every direction. Face brightness must be perfectly even. ZERO facial shadows: none under brows, eyes, nose, cheeks, lips, or chin. No side/top/rim/Rembrandt/chiaroscuro/dramatic lighting. "
+                "ต้องเป็นสิ่งเดียวกันทุกช่องและรักษาชนิด รูปร่าง สี ลวดลาย และจุดจำให้ตรงกัน. "
+                "จัดเป็นแผ่นอ้างอิง 5 ช่อง. แถวบนมี 4 ช่องเล็กเท่ากันเรียงซ้ายไปขวา: ใบหน้า close-up ด้านซ้าย, ใบหน้า close-up ด้านขวา, เต็มตัวด้านหน้า, เต็มตัวด้านหลัง. "
+                "แถวล่างมี 1 ช่องใหญ่เป็นใบหน้าตรง close-up ระยะหัวถึงไหล่ ให้หน้าตรงเป็นภาพหลักและใหญ่ที่สุด. ภาพเต็มตัวต้องเห็นศีรษะถึงเท้าครบแต่เล็กกว่าหน้าตรง. ห้ามสร้างตัวอักษร หัวเรื่อง NOTE หรือป้ายชื่อภายในภาพ เพราะโปรแกรมจะเติมชื่อภายหลัง. ห้ามฉากหรือภาพรวมอื่น. "
+                "ถ้าเป็นสัตว์หรือสิ่งที่ปกติไม่สวมเสื้อผ้า ห้ามเพิ่มเสื้อผ้าเอง. "
+                f"แถบล่างใส่ชื่อไทย '{name}' ครั้งเดียว.{outfit_text} "
+                "พื้นขาว 5600K คงสีผิวและรายละเอียดผิวจริง ไม่ทำหน้าขาวลอยหรือผิวพลาสติก. รายละเอียดคมชัด ห้ามฉาก คนอื่น ข้อความอื่น และ watermark. photorealistic."
             )
 
         if kind == "location":
@@ -1678,10 +1660,31 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 "ห้ามคน เหตุการณ์ วิญญาณ โทนมืด กลางคืน หมอก ฝน floor plan ภาพ 3D cutaway สถานที่อื่น และ watermark. photorealistic, sharp."
             )
 
-        # Character Ref is a pure serialization of one canonical Character Visual Bible object.
-        # No wardrobe inference, ghost reinterpretation, or cross-character lookup is allowed here.
-        return _clip_ref_prompt(character_prompt_text(entity), 4200)
-        
+        # Character Ref is an attachment-ready identity sheet.  Context only
+        # locks visible identity traits; story events and locations stay out.
+        details = _useful_context_fields(entity, (
+            ("visual_identity", "ภาพจำ"), ("อายุ", "วัย"), ("เพศ", "เพศ"),
+            ("รูปร่าง", "รูปร่าง"), ("ส่วนสูง", "ส่วนสูง"), ("สีผิว", "สีผิว"),
+            ("ทรงผม", "ผม"), ("ใบหน้า", "ใบหน้า"), ("ดวงตา", "ดวงตา"),
+            ("ลักษณะเด่น", "จุดจำ"),
+        ))
+        if not details and selected_match and selected_ctx:
+            details = selected_ctx
+        source = _clip_ref_prompt(
+            details or "คนไทยสมจริงหนึ่งแบบตามชื่อและบทบาทใน Context",
+            190,
+        )
+        return _clip_ref_prompt(
+            f"สร้าง CHARACTER REFERENCE SHEET ของ '{name}' คนเดียว. "
+            "LIGHTING LOCK: flat frontal ID-photo lighting, large camera-front softbox plus equal 1:1 fill from every direction. Face brightness must be perfectly even. ZERO facial shadows: none under brows, eyes, nose, cheeks, lips, or chin. No side/top/rim/Rembrandt/chiaroscuro/dramatic lighting. "
+            "จัดเป็นแผ่นอ้างอิง 5 ช่อง. แถวบนมี 4 ช่องเล็กเท่ากันเรียงซ้ายไปขวา: ใบหน้า close-up ด้านซ้าย, ใบหน้า close-up ด้านขวา, เต็มตัวด้านหน้า, เต็มตัวด้านหลัง. "
+            "แถวล่างมี 1 ช่องใหญ่เป็นใบหน้าตรง close-up ระยะหัวถึงไหล่ ให้หน้าตรงเป็นภาพหลักและใหญ่ที่สุด. ภาพเต็มตัวต้องเห็นศีรษะถึงเท้าครบแต่เล็กกว่าหน้าตรง. ห้ามสร้างตัวอักษร หัวเรื่อง NOTE หรือป้ายชื่อภายในภาพ เพราะโปรแกรมจะเติมชื่อภายหลัง. ทุกช่องต้องเป็นคนเดียวกัน สีหน้าเป็นกลาง และรักษาใบหน้าเดิม. "
+            f"ล็อกรูปลักษณ์จาก Character Bible: {source}. "
+            f"เปลี่ยนเฉพาะเสื้อผ้า: {_character_outfit_instruction(entity, film)}. "
+            "พื้นขาว 5600K คงสีผิวและรายละเอียดผิวจริง ไม่ทำหน้าขาวลอยหรือผิวพลาสติก. "
+            "ห้ามฉาก พร็อพ คนอื่น อารมณ์เหตุการณ์ บาดแผล โทนมืด กลางคืน และ watermark. photorealistic, sharp."
+        )
+
     g["_clean_character_ref_context"] = _clean_character_ref_context
     g["_extract_character_appearance"] = _extract_character_appearance
     g["_context_entity_for_ref"] = _context_entity
@@ -1850,6 +1853,14 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         _ref_log(
                             f"[location-lock] {'ใช้แบบที่ล็อกไว้' if reused else 'สร้างและบันทึกแบบใหม่'}: {name}"
                         )
+                    elif context_kind in ("character", "manual") and _is_ghost_character(name, context_entity):
+                        _ref_log(f"[ghost-research] กำลังวิเคราะห์ชนิดผีและคติที่เกี่ยวข้อง: {name}")
+                        ghost_design, reused = _analyze_ghost_character(name, context_entity, _film)
+                        ghost_type = str(ghost_design.get("ghost_type") or "ผี").strip()
+                        _ref_log(
+                            f"[ghost-research] {'ใช้ Ghost Bible เดิม' if reused else 'วิเคราะห์และบันทึก Ghost Bible แล้ว'}: "
+                            f"{name} — {ghost_type}"
+                        )
                     prompt = _build_ref_prompt(
                         name,
                         entity_kind=entity_kind or context_kind,
@@ -1864,33 +1875,34 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     else:
                         _ref_log(f"[context] พบเพียงชื่อ {name} — เติมเฉพาะรายละเอียดที่ Context ไม่ระบุ")
                     refine = g.get("_refine_prompt_via_ai") or globals().get("_refine_prompt_via_ai")
-                    is_location_ref = bool(context_kind == "location" or entity_kind == "location")
-                    if is_location_ref and callable(refine):
-                        _ref_log(f"[refine] ส่ง GPT แปลง prompt Location Ref: {name}")
+                    if callable(refine) and ghost_design is None:
+                        _ref_log(f"[refine] ส่ง GPT แปลง prompt Ref: {name}")
+                        # Select details are already embedded in `prompt`.
+                        # Never append the full story context here.
                         refined_prompt = refine(prompt, kind="ref", use_context=False)
                         if refined_prompt and refined_prompt != prompt:
                             _ref_log(f"[refine] ได้ prompt ใหม่ ({len(refined_prompt)} chars)")
                             prompt = refined_prompt
                     else:
-                        _ref_log("[refine] ข้าม Character Ref เพื่อรักษา layout หน้าตรง + 3/4 view + เต็มตัว ตาม prompt โดยตรง")
+                        _ref_log(
+                            "[refine] ใช้ Ghost Bible โดยตรงเพื่อไม่ให้ชนิดผีถูกตีความใหม่"
+                            if ghost_design is not None else
+                            "[refine] ไม่เจอตัวแปลง prompt — ใช้ prompt เดิม"
+                        )
                     if auto and auto_ref_stop[0]:
                         _ref_log(f"[auto-ref] หยุดแล้ว — ข้าม {name}")
                         return
                     _ref_log(f"[auto-ref] รูปที่ {idx}/{len(names)} — เริ่มสร้าง: {name}")
-                    ref_aspect_ratio = "1:1" if (context_kind == "location" or entity_kind == "location") else "16:9"
                     payload = {
-                        "model":"gpt-5-5", "prompt":prompt, "n":1,
-                        "aspect_ratio":ref_aspect_ratio, "history_and_training_disabled":False,
-                        "_use_ref_story_history": bool(is_location_ref),
+                        "model":"auto", "prompt":prompt, "n":1,
+                        "aspect_ratio":"1:1", "history_and_training_disabled":False,
+                        "_use_ref_story_history": True,
                     }
                     if ref_image and os.path.exists(ref_image):
                         with open(ref_image, "rb") as _f:
                             import base64 as _b64
                             payload["images"] = [_b64.b64encode(_f.read()).decode("utf-8")]
                         _ref_log(f"[ref] แนบรูปอ้างอิง: {os.path.basename(ref_image)}")
-                    if context_kind == "character" and context_entity:
-                        debug_path = save_debug_snapshot(BASE, context_entity, prompt)
-                        _ref_log(f"[debug] Character Ref snapshot: {debug_path}")
                     file_hint = _outfit_name_hint(name, entity_kind or context_kind)
                     out = g["_do_image_request"](payload, is_edit=bool(ref_image and os.path.exists(ref_image)), prompt=prompt, name_hint=file_hint, raw_prompt=prompt, output_dir=str(export_ref_dir))
                     out = _normalize_ref_output(out, name)
@@ -2073,4 +2085,3 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     tk.Button(row, text="🧹 ล้างรูป", command=clear_ref_gallery, bg="#DC2626", fg="white", activebackground="#B91C1C", activeforeground="white", relief="flat", bd=0, padx=14, pady=7, width=14, height=1, font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left", padx=4)
     g["ref_page"] = ref_page
     return ref_page
-

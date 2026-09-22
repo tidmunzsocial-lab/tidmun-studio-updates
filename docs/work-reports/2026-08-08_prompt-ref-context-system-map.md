@@ -4,7 +4,7 @@
 - Status: completed
 - Summary: สำรวจ Prompt-Ref story ingestion, ChatGPT conversation state, Context schema/audit/persistence, shared Context normalization, Ref/Prop/Image consumers, Storyboard generation/split/writeback, history isolation, source invalidation, tests และเอกสาร transport จาก working tree ปัจจุบัน แล้วจัดทำ system map กลาง
 - Files Changed:
-  - `docs/PROMPT_REF_CONTEXT_SYSTEM.md`
+  - `กฏของโปรแกรม/PROMPT_REF_CONTEXT_SYSTEM.md`
   - `docs/work-reports/2026-08-08_prompt-ref-context-system-map.md`
   - `docs/work-reports/LATEST.md`
 - Important Changes:
@@ -23,7 +23,7 @@
   - ตรวจ `git diff --check` และ `git diff` เฉพาะไฟล์งานก่อน commit
 - Remaining Issues:
   - ไม่ได้แก้ observed mismatches เพราะ requirement ระบุห้ามแก้โค้ด
-  - `docs/PROMPT_REF_STORYBOARD_TRANSPORT.md` กับ active Vision implementation มีความต่างที่ควร runtime-verify ก่อนแก้ในงานแยก
+  - `กฏของโปรแกรม/PROMPT_REF_STORYBOARD_TRANSPORT.md` กับ active Vision implementation มีความต่างที่ควร runtime-verify ก่อนแก้ในงานแยก
   - v4 categorized breakdown กับ v3 compatibility Context ต้องระวัง caller แต่ไม่ได้แก้ในงานนี้
 - Risks:
   - Working tree เดิมมี modified/untracked files จำนวนมากจาก session ก่อนหน้า จึงต้อง stage เฉพาะไฟล์เอกสารงานนี้
