@@ -26,6 +26,7 @@ from snapgen_page_builder import (
     remove_selection_lock as _builder_remove_selection_lock,
 )
 from snapgen_button_styles import STYLE
+from snapgen_story_types import STORY_TYPE_OPTIONS, normalize_story_type, story_type_profile
 
 
 def is_explicit_ghost_character(name, entity):
@@ -107,6 +108,14 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     except Exception:
         _saved_ref_settings = {}
     ref_use_context_var = tk.BooleanVar(value=bool(_saved_ref_settings.get("use_context", False)))
+    saved_story_type = normalize_story_type(_saved_ref_settings.get("story_type") or "auto")
+    story_type_labels = [label for _story_type, label in STORY_TYPE_OPTIONS]
+    story_type_by_label = {label: story_type for story_type, label in STORY_TYPE_OPTIONS}
+    saved_story_type_label = next(
+        (label for story_type, label in STORY_TYPE_OPTIONS if story_type == saved_story_type),
+        story_type_labels[0],
+    )
+    ref_story_type_var = tk.StringVar(value=saved_story_type_label)
     g["_ref_selected_context"] = ""
     g["_ref_selected_name"] = ""
     g["_ref_selected_kind"] = ""
@@ -116,6 +125,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     g["ref_outfit_var"] = ref_outfit_var
     g["ref_custom_outfit_var"] = ref_custom_outfit_var
     g["ref_use_context_var"] = ref_use_context_var
+    g["ref_story_type_var"] = ref_story_type_var
     
     box = tk.LabelFrame(ref_page, text="🎭 Ref", bg="#FAFAF7", fg="#1A1A1A", padx=10, pady=8)
     box.pack(fill="x", padx=10, pady=10)
@@ -154,6 +164,20 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
              bg="#FFFFFF", fg="#111", padx=7).pack(fill="both", expand=True)
     tk.Label(story_row, textvariable=ref_story_status_var, bg="#FAFAF7",
              fg="#6B7280").pack(side="left", padx=(0, 8))
+
+    type_row = tk.Frame(box, bg="#FAFAF7")
+    type_row.pack(fill="x", pady=(0, 6))
+    _form_label(type_row, "ประเภทเรื่อง:", bold=True)
+    ref_story_type_combo = _ttk.Combobox(
+        type_row, textvariable=ref_story_type_var, values=story_type_labels,
+        state="readonly", width=38,
+    )
+    ref_story_type_combo.pack(side="left", padx=(6, 8), ipady=4)
+    tk.Label(
+        type_row,
+        text="อัตโนมัติ = อ่านจากบท | เปลี่ยนได้ก่อนสร้างตัวละคร",
+        bg="#FAFAF7", fg="#6B7280",
+    ).pack(side="left")
 
     def _prompt_ref_story_title():
         try:
@@ -274,12 +298,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     def _save_ref_page_settings(*_args):
         try:
             ref_settings_path.write_text(
-                json.dumps({"use_context": bool(ref_use_context_var.get())}, ensure_ascii=False, indent=2),
+                json.dumps({
+                    "use_context": bool(ref_use_context_var.get()),
+                    "story_type": story_type_by_label.get(ref_story_type_var.get(), "auto"),
+                }, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
             pass
     ref_use_context_var.trace_add("write", _save_ref_page_settings)
+    ref_story_type_var.trace_add("write", _save_ref_page_settings)
     tk.Checkbutton(
         row, text="ใช้ Context", variable=ref_use_context_var,
         bg="#FAFAF7", activebackground="#FAFAF7", fg="#374151",
@@ -1132,6 +1160,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "summary": str(story.get("summary") or "").strip(),
             "era": str(story.get("era") or "").strip(),
             "main_location": str(story.get("main_location") or "").strip(),
+            "story_type": str(story.get("story_type") or story.get("genre") or story.get("story_type_label") or data.get("story_type") or data.get("story_type_label") or "").strip(),
+            "story_type_label": str(story.get("story_type_label") or data.get("story_type_label") or "").strip(),
+            "story_type_evidence": str(story.get("story_type_evidence") or data.get("story_type_evidence") or "").strip(),
         }
         return kind, found, film
 
@@ -1616,6 +1647,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             kind = kind or requested_kind
         else:
             kind, entity, film = "manual", {}, {}
+        selected_story_type = story_type_by_label.get(ref_story_type_var.get(), "auto")
+        story_type_id, story_profile = story_type_profile(
+            selected_story_type if selected_story_type != "auto" else film.get("story_type")
+        )
+        story_type_label = story_profile.get("label") or "ยังไม่ระบุประเภท"
+        story_type_rules = _clip_ref_prompt(" ".join(
+            str(story_profile.get(key) or "").strip()
+            for key in ("world", "characters", "period", "costume", "avoid")
+            if str(story_profile.get(key) or "").strip()
+        ), 300)
 
         if isinstance(ghost_design, dict):
             # Keep room for the non-negotiable reference-sheet layout and
@@ -1628,6 +1669,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 ("ลักษณะเด่น", "จุดจำ"),
             )), 150) or "ยึดชื่อและชนิดผีที่ผู้ใช้ระบุ"
             return _clip_ref_prompt(
+                f"ประเภทเรื่อง: {story_type_label} ({story_type_id}). {story_type_rules} "
                 f"สร้าง THAI GHOST CHARACTER REFERENCE SHEET ของ '{name}' ผีชนิดเฉพาะเพียงตัวเดียว. "
                 "REFERENCE SHEET LOCK: พื้นหลังขาวล้วนทุกช่อง ใช้ bright high-key studio แสงขาวนุ่มสม่ำเสมอ เห็นผม ใบหน้า เสื้อผ้า และรูปร่างครบชัดเจน. ห้ามพื้นดำ โทนมืด ฉากกลางคืน หมอก ควัน วิวสถานที่ และ dramatic low-key lighting. "
                 "HORROR CREATURE LOCK: ทำเป็นตัวร้ายหนังผีไทยที่มีจุดขายทางกายภาพ 2-3 จุดเด่น เห็นชัดและจำได้ทันทีทุกมุม แม้อยู่บนพื้นขาว. จุดขายต้องอยู่ที่ใบหน้า ดวงตา ปาก ผิว สัดส่วน ท่าทาง หรือเครื่องหมายเฉพาะชนิดผี ไม่ใช่แค่คนแก่สกปรกและไม่ใช่แค่แสงเรืองที่จมูก. "
@@ -1649,6 +1691,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             if outfit_mode != "อัตโนมัติตามเนื้อเรื่อง":
                 outfit_text = f" เปลี่ยนเฉพาะเสื้อผ้าตามคำสั่งนี้: {_character_outfit_instruction({}, {})}."
             return _clip_ref_prompt(
+                f"ประเภทเรื่อง: {story_type_label} ({story_type_id}). {story_type_rules} "
                 f"สร้าง SUBJECT REFERENCE SHEET ของ '{name}' จากชื่อที่ผู้ใช้พิมพ์เท่านั้น ห้ามใช้ข้อมูลจาก Prompt Context หรือเนื้อเรื่อง. "
                 "LIGHTING LOCK: flat frontal ID-photo lighting, large camera-front softbox plus equal 1:1 fill from every direction. Face brightness must be perfectly even. ZERO facial shadows: none under brows, eyes, nose, cheeks, lips, or chin. No side/top/rim/Rembrandt/chiaroscuro/dramatic lighting. "
                 "ต้องเป็นสิ่งเดียวกันทุกช่องและรักษาชนิด รูปร่าง สี ลวดลาย และจุดจำให้ตรงกัน. "
@@ -1678,6 +1721,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             # otherwise the final view/name rules are truncated at 800 chars.
             source = _clip_ref_prompt(source, 185)
             return _clip_ref_prompt(
+                f"ประเภทเรื่อง: {story_type_label} ({story_type_id}). {story_type_rules} "
                 f"สร้าง LOCATION REFERENCE SHEET ของ '{name}' สถานที่เดียว แบ่ง 4 ช่องเท่ากัน 2x2. "
                 "ทั้ง 4 ช่องต้องเป็นสถานที่และดีไซน์เดียวกัน ล็อกวัสดุ สี จำนวนห้อง ประตู หน้าต่าง และองค์ประกอบให้ตรงกัน. "
                 "มุมที่ 1 ด้านหน้า, มุมที่ 2 เฉียงซ้าย, มุมที่ 3 เฉียงขวา, มุมที่ 4 ย้อนกลับจากอีกด้าน. "
@@ -1702,6 +1746,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             190,
         )
         return _clip_ref_prompt(
+            f"ประเภทเรื่อง: {story_type_label} ({story_type_id}). {story_type_rules} "
             f"สร้าง CHARACTER REFERENCE SHEET ของ '{name}' คนเดียว. "
             "LIGHTING LOCK: flat frontal ID-photo lighting, large camera-front softbox plus equal 1:1 fill from every direction. Face brightness must be perfectly even. ZERO facial shadows: none under brows, eyes, nose, cheeks, lips, or chin. No side/top/rim/Rembrandt/chiaroscuro/dramatic lighting. "
             "จัดเป็นแผ่นอ้างอิง 5 ช่อง. แถวบนมี 4 ช่องเล็กเท่ากันเรียงซ้ายไปขวา: ใบหน้า close-up ด้านซ้าย, ใบหน้า close-up ด้านขวา, เต็มตัวด้านหน้า, เต็มตัวด้านหลัง. "

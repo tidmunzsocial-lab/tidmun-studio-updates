@@ -347,6 +347,7 @@ sys.path.insert(0, str(BASE_ROOT))
 sys.path.insert(0, str(BASE_ROOT / "vendor"))
 # Modular .py files live in snapgen_modules/ to keep project root clean.
 sys.path.insert(0, str(BASE_ROOT / "snapgen_modules"))
+from snapgen_story_types import normalize_story_type, story_type_profile, story_type_prompt_rules
 
 # Choose one stable Thai-capable font before the recovered core creates Tk
 # widgets. Windows Tahoma avoids broken Thai combining marks across machines.
@@ -8294,8 +8295,9 @@ def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
         "content": (
             "ตอบ JSON object เท่านั้น ห้าม markdown ห้ามอธิบาย ห้ามบอกว่าไม่มีไฟล์แนบ "
             "เพราะบทครบทุก FULL_STORY_PART อยู่ในประวัติเดียวกัน ใช้ข้อมูลจากบทจริง; รายละเอียดภาพที่บทไม่ระบุแต่จำเป็น "
-            "ให้สมมุติอย่างสมเหตุผลและลงท้าย '(สมมุติเพื่อภาพ)'. schema: "
-            "{\"version\":3,\"story\":{\"title\":\"\",\"summary\":\"\",\"era\":\"\",\"main_location\":\"\",\"key_places\":[]},"
+            "ให้สมมุติอย่างสมเหตุผลและลงท้าย '(สมมุติเพื่อภาพ)'. "
+            + story_type_prompt_rules() + " schema: "
+            "{\"version\":3,\"story\":{\"title\":\"\",\"summary\":\"\",\"era\":\"\",\"main_location\":\"\",\"story_type\":\"\",\"story_type_label\":\"\",\"story_type_evidence\":\"\",\"key_places\":[]},"
             "\"characters\":[{\"name\":\"\",\"อายุ\":\"\",\"เพศ\":\"\",\"บทบาท\":\"\",\"รูปร่าง\":\"\",\"ส่วนสูง\":\"\","
             "\"สีผิว\":\"\",\"ทรงผม\":\"\",\"ใบหน้า\":\"\",\"ดวงตา\":\"\",\"เสื้อผ้า\":\"\",\"visual_identity\":\"\","
             "\"ลักษณะเด่น\":\"\",\"must_include\":[],\"must_not_include\":[],\"assumptions\":[],\"@ref\":null}],"
@@ -8366,8 +8368,9 @@ def _attach_docx_and_build_prompt_ref_context(source_file, story_for_hash=""):
             "ชื่อหรือคำในวงเล็บท้ายบรรทัดหัวเรื่องเป็น metadata ไม่ใช่ตัวละคร เว้นแต่ชื่อนั้นปรากฏเป็นผู้พูดหรือผู้กระทำในเนื้อเรื่องด้วย; "
             "ถ้าผู้เล่าบอกชื่อตัวเองด้วยข้อความเช่น 'ผมชื่อ ...' ให้ใช้ชื่อนั้นและให้หลักฐานนี้มีลำดับเหนือกว่าหัวเรื่อง; "
             "ห้ามใส่คำบอกวัยหรือประเภทบุคคลต่อท้าย name; ถ้ายังไม่ทราบชื่อให้ใช้ ผู้เล่า เท่านั้น; "
-            "ข้อมูลว่าเป็นเด็กให้ใส่ใน อายุ บทบาท หรือ visual_identity แทน; @ref ต้องใช้ชื่อเดียวกับ name. schema: "
-            '{"version":3,"story":{"title":"","summary":"","era":"","main_location":"","key_places":[]},'
+            "ข้อมูลว่าเป็นเด็กให้ใส่ใน อายุ บทบาท หรือ visual_identity แทน; @ref ต้องใช้ชื่อเดียวกับ name. "
+            + story_type_prompt_rules() + " schema: "
+            '{"version":3,"story":{"title":"","summary":"","era":"","main_location":"","story_type":"","story_type_label":"","story_type_evidence":"","key_places":[]},'
             '"characters":[{"name":"","อายุ":"","เพศ":"","บทบาท":"","รูปร่าง":"","ส่วนสูง":"",'
             '"สีผิว":"","ทรงผม":"","ใบหน้า":"","ดวงตา":"","เสื้อผ้า":"","visual_identity":"",'
             '"ลักษณะเด่น":"","must_include":[],"must_not_include":[],"assumptions":[],"@ref":null}],'
@@ -8424,7 +8427,8 @@ def _build_prompt_ref_context_in_history():
             "ถ้าผู้เล่าบอกชื่อตัวเองด้วยข้อความเช่น 'ผมชื่อ ...' ให้ใช้ชื่อนั้นและให้หลักฐานนี้มีลำดับเหนือกว่าหัวเรื่อง; "
             "ห้ามใส่คำบอกวัยหรือประเภทบุคคลต่อท้าย name; ถ้ายังไม่ทราบชื่อให้ใช้ ผู้เล่า เท่านั้น; "
             "ข้อมูลว่าเป็นเด็กให้ใส่ใน อายุ บทบาท หรือ visual_identity แทน; @ref ต้องใช้ชื่อเดียวกับ name. "
-            "schema: {\"version\":3,\"story\":{\"title\":\"ชื่อเรื่องสั้นจากบรรทัดหัวเรื่องของบท\",\"summary\":\"\",\"era\":\"\",\"main_location\":\"\",\"key_places\":[]},"
+            + story_type_prompt_rules() + " schema: "
+            "{\"version\":3,\"story\":{\"title\":\"ชื่อเรื่องสั้นจากบรรทัดหัวเรื่องของบท\",\"summary\":\"\",\"era\":\"\",\"main_location\":\"\",\"story_type\":\"\",\"story_type_label\":\"\",\"story_type_evidence\":\"\",\"key_places\":[]},"
             "\"characters\":[{\"name\":\"\",\"อายุ\":\"\",\"เพศ\":\"\",\"บทบาท\":\"\",\"รูปร่าง\":\"\",\"ส่วนสูง\":\"\","
             "\"สีผิว\":\"\",\"ทรงผม\":\"\",\"ใบหน้า\":\"\",\"ดวงตา\":\"\",\"เสื้อผ้า\":\"\",\"visual_identity\":\"\","
             "\"ลักษณะเด่น\":\"\",\"must_include\":[],\"must_not_include\":[],\"assumptions\":[],\"@ref\":null}],"
@@ -9848,7 +9852,7 @@ def _parse_bridge_context_json(raw):
         repaired = fragment + ("}" * depth)
         try:
             value = json.loads(repaired)
-            return value if isinstance(value, dict) else None
+            return _normalize_context_story_type(value) if isinstance(value, dict) else None
         except Exception:
             return None
 
@@ -9863,7 +9867,7 @@ def _parse_bridge_context_json(raw):
 
         repaired = repair_truncated_object(candidate)
         if isinstance(repaired, dict):
-            return repaired
+            return _normalize_context_story_type(repaired)
 
         # Accept a valid object surrounded by a short explanation or trailing
         # prose, but do not silently return a nested child object from a broken
@@ -9878,7 +9882,7 @@ def _parse_bridge_context_json(raw):
             try:
                 value, _end = decoder.raw_decode(candidate[pos:])
                 if isinstance(value, dict):
-                    return value
+                    return _normalize_context_story_type(value)
             except Exception:
                 continue
 
@@ -9888,6 +9892,24 @@ def _parse_bridge_context_json(raw):
         + (f"\nคำตอบที่ได้รับ: {preview}" if preview else "")
         + (f"\nรายละเอียด: {errors[-1]}" if errors else "")
     )
+
+
+def _normalize_context_story_type(value):
+    """Canonicalize the new story type fields while keeping older Contexts valid."""
+    if not isinstance(value, dict):
+        return value
+    story = value.get("story")
+    if not isinstance(story, dict):
+        return value
+    raw_type = story.get("story_type") or story.get("genre") or value.get("story_type")
+    story_type = normalize_story_type(raw_type)
+    if story_type == "auto":
+        return value
+    _story_type, profile = story_type_profile(story_type)
+    story["story_type"] = story_type
+    story["story_type_label"] = str(story.get("story_type_label") or profile.get("label") or "")
+    story["story_type_evidence"] = str(story.get("story_type_evidence") or "ตรวจจากยุค โลกเรื่อง ความเชื่อ และตัวละครในบท")
+    return value
 
 
 def _summarize_source_file_for_prompt_refs(file_path, scene="", story_bible=""):
@@ -9906,6 +9928,9 @@ def _summarize_source_file_for_prompt_refs(file_path, scene="", story_bible=""):
     "summary": "เรื่องสยองขวัญ ชายคนหนึ่งพบเหตุการณ์ลี้ลับในห้องเช่าข้างๆ",
     "era": "ยุคปัจจุบัน ไม่กี่ปีที่ผ่านมา",
     "main_location": "ห้องเช่าในจังหวัดอุบลราชธานี (ไม่ระบุชื่อสถานที่)",
+    "story_type": "ghost_horror",
+    "story_type_label": "เรื่องผี/สยองขวัญ",
+    "story_type_evidence": "มีวิญญาณและเหตุการณ์ลี้ลับเป็นแกนหลักของเรื่อง",
     "key_places": [
       "ห้องเช่าชั้นเดียวเรียงติดกัน 10 ห้อง",
       "ห้องของชด (ห้องที่เก้า)",
@@ -10050,6 +10075,7 @@ def _summarize_source_file_for_prompt_refs(file_path, scene="", story_bible=""):
     "ห้ามทำให้บรรยากาศเป็นแฟนตาซีเกินจริง"
   ]
 }'''
+        + "\n\n" + story_type_prompt_rules()
         + "\n\nกฎ: ดึงข้อมูลจากไฟล์จริง. ถ้าไม่มีใส่ 'ไม่ระบุ' หรือ null. ถ้าอายุ/เสื้อผ้า/หน้าตาไม่มีในไฟล์ แต่งเพิ่มให้เข้าเรื่องและติด '(สมมุติเพื่อภาพ)' ท้ายค่านั้น. "
           "characters เป็น Character Bible บังคับ: ตัวละครทุก object ต้องมี name, อายุ, เพศ, บทบาท, รูปร่าง, ส่วนสูง, สีผิว, ทรงผม, ใบหน้า, ดวงตา, เสื้อผ้า, visual_identity, ลักษณะเด่น, must_include, must_not_include, assumptions และ @ref ครบ. "
           "ใช้บทเต็มคิดรูปลักษณ์ที่เหมาะกับอายุ อาชีพ ฐานะ จังหวัด ยุค บุคลิก และบทบาทของแต่ละคนทันที. ถ้าบทไม่ระบุให้สมมุติรูปลักษณ์หนึ่งแบบที่สมเหตุสมผลและบันทึกใน assumptions เพื่อใช้ล็อกตลอดเรื่อง; ห้ามตอบ 'ไม่ระบุ' ในข้อมูลรูปลักษณ์ที่จำเป็นต่อการสร้างภาพ. Character Bible เป็นรูปลักษณ์พื้นฐาน ห้ามใส่บาดแผล ความกลัว แสงมืด หรือสภาพชั่วคราวจากฉากลงเป็นตัวตนถาวร. "
