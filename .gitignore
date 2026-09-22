@@ -32,6 +32,9 @@ ltx_cloud.json
 minimax_cloud.json
 snapgen_vast_ed25519
 snapgen_vast_ed25519.pub
+/chatgpt-api/
+/**/secrets/accounts/
+/**/outputs/chatgpt-admin.sqlite
 .claude/
 .codex/
 STATE.md
