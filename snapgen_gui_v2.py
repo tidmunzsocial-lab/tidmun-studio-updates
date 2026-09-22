@@ -11244,6 +11244,7 @@ def _open_prompt_bank_ai():
             )
             def worker():
                 try:
+                    raw_context = None
                     with _bridge_queue_lock:
                         _wait_bridge_free(log_fn=lambda m: root.after(0, lambda m=m: st.set(m)))
                         root.after(0, lambda: st.set("[queue] ✓ Bridge ว่าง — สรุปบทหลักเป็น Context"))
@@ -11254,15 +11255,32 @@ def _open_prompt_bank_ai():
                             out = _attach_docx_and_build_prompt_ref_context(selected_docx, selected_story)
                         except Exception as first_error:
                             text = str(first_error).casefold()
-                            closed = any(marker in text for marker in (
-                                "curl exit 52", "empty reply", "remote end closed",
-                                "connection reset", "failed to connect",
-                            ))
-                            if not closed or not _rebuild_prompt_ref_bridge_once():
-                                raise
-                            root.after(0, lambda: st.set("[ซ่อม] ✓ normal-chat ผ่าน — ลอง Context ใหม่"))
-                            out = _attach_docx_and_build_prompt_ref_context(selected_docx, selected_story)
-                        raw_context = _parse_bridge_context_json(out)
+                            pointer_incompatibility = (
+                                "midi_asset_pointer" in text
+                                or "chatgpt prepare failed: 422" in text
+                                or "provider_status=422" in text
+                            )
+                            if pointer_incompatibility:
+                                root.after(0, lambda: st.set(
+                                    "[fallback] ChatGPT รุ่นนี้ไม่รับ DOCX pointer — ส่งข้อความบทที่อ่านได้แทน"
+                                ))
+                                # The DOCX was already extracted locally into selected_story.
+                                # Rebuild the context from that exact text so the normal-chat
+                                # request never carries the unsupported file pointer.
+                                out = _ingest_and_build_prompt_ref_context(selected_story, selected_docx)
+                                raw_context = _parse_bridge_context_json(out)
+                            else:
+                                closed = any(marker in text for marker in (
+                                    "curl exit 52", "empty reply", "remote end closed",
+                                    "connection reset", "failed to connect",
+                                ))
+                                if not closed or not _rebuild_prompt_ref_bridge_once():
+                                    raise
+                                root.after(0, lambda: st.set("[ซ่อม] ✓ normal-chat ผ่าน — ลอง Context ใหม่"))
+                                out = _attach_docx_and_build_prompt_ref_context(selected_docx, selected_story)
+                                raw_context = _parse_bridge_context_json(out)
+                        if raw_context is None:
+                            raw_context = _parse_bridge_context_json(out)
                     def done():
                         try:
                             if not cw.winfo_exists():
