@@ -193,8 +193,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 ref_story_sending[0] = False
                 if error:
                     ref_story_title_var.set("")
-                    ref_story_status_var.set("ส่งบทไม่สำเร็จ")
-                    _ref_log("[บทเรื่อง] " + error)
+                    friendly = g.get("_snapgen_friendly_bridge_error")
+                    message = friendly(error) if callable(friendly) else error
+                    needs_login = g.get("_snapgen_bridge_needs_login")
+                    login_required = bool(needs_login(error)) if callable(needs_login) else False
+                    ref_story_status_var.set("ต้องล็อกอิน ChatGPT ใหม่" if login_required else "ส่งบทไม่สำเร็จ")
+                    _ref_log("[บทเรื่อง] " + message)
+                    if login_required:
+                        open_manager = g.get("manage_bridge")
+                        if callable(open_manager):
+                            root.after(150, open_manager)
                 else:
                     getter = g.get("get_ref_story_title")
                     ref_story_title_var.set(getter() if callable(getter) else title)

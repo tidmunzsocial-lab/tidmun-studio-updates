@@ -827,8 +827,16 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
                 story_context_state["sending"] = False
                 story_context_state["ready"] = error is None
                 if error:
-                    story_file_var.set("ส่งบทไม่สำเร็จ")
-                    _log("❌ [บทเรื่อง] " + error)
+                    friendly = g.get("_snapgen_friendly_bridge_error")
+                    message = friendly(error) if callable(friendly) else error
+                    needs_login = g.get("_snapgen_bridge_needs_login")
+                    login_required = bool(needs_login(error)) if callable(needs_login) else False
+                    story_file_var.set("ต้องล็อกอิน ChatGPT ใหม่" if login_required else "ส่งบทไม่สำเร็จ")
+                    _log("❌ [บทเรื่อง] " + message)
+                    if login_required:
+                        open_manager = g.get("manage_bridge")
+                        if callable(open_manager):
+                            root.after(150, open_manager)
                 else:
                     uploaded_title = (
                         str((ingest_result or {}).get("story_title") or "").strip()

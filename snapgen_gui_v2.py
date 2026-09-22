@@ -771,6 +771,19 @@ g["_api_base"] = lambda: f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1"
 g["CHATGPT_API_BASE"] = f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1"
 g["CHATGPT_API_KEY"] = "local-dev-key"
 
+def _snapgen_bridge_needs_login(msg):
+    lowered = str(msg).casefold()
+    return any(marker in lowered for marker in (
+        "token_revoked",
+        "token invalidated",
+        "invalidated oauth token",
+        "provider_auth_error",
+        "chatgpt_auth_or_browser_challenge",
+        "refresh the account capture/cookies",
+    )) or ("provider status: 401" in lowered or "http 401" in lowered)
+
+g["_snapgen_bridge_needs_login"] = _snapgen_bridge_needs_login
+
 def _snapgen_friendly_bridge_error(msg):
     raw = str(msg)
     lowered = raw.casefold()
@@ -793,15 +806,14 @@ def _snapgen_friendly_bridge_error(msg):
             "SnapGen หยุดงานนี้แล้วและไม่ยิงซ้ำ เพื่อไม่ให้เสียโควต้าเพิ่ม\n"
             "รอสักครู่แล้วกดงานเดิมใหม่หนึ่งครั้ง; ถ้ายังเกิดซ้ำค่อย refresh account capture"
         )
-    if ("token_invalidated" in raw or "Provider status: 401" in raw or
-            "HTTP 401" in raw or "Refresh the account capture/cookies" in raw):
+    if _snapgen_bridge_needs_login(raw):
         return (
-            "ChatGPT Web login หมดอายุ / token ใช้ไม่ได้แล้ว\n\n"
+            "ต้องล็อกอิน ChatGPT ใหม่ — token ของบัญชีที่ Bridge ใช้อยู่ถูกยกเลิกหรือหมดอายุ\n\n"
             "วิธีแก้:\n"
-            "1. กด ⚙ Settings > Bridge\n"
-            "2. เปิด/refresh account capture หรือ sign in ChatGPT ใหม่\n"
-            "3. Restart Bridge แล้วลองสร้างรูปอีกครั้ง\n\n"
-            "รายละเอียดเดิม:\n" + raw
+            "1. เปิด ⚙ Settings > Bridge Manager\n"
+            "2. กด เปิดและจับ Account อัตโนมัติ\n"
+            "3. ล็อกอิน ChatGPT ในหน้าต่าง SnapGen Browser แล้วสร้างคำขอสำเร็จ 1 ครั้ง\n"
+            "4. Restart Bridge และเริ่มเรื่องใหม่อีกครั้ง"
         )
     if "429" in raw or "Too many requests" in raw or "chatgpt_rate_limited" in raw:
         return (
