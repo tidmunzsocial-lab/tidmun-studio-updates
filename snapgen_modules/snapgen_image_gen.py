@@ -236,6 +236,7 @@ def send_ref_story_type_lock(story_type, *, log_fn=None):
     log = log_fn or _log
     payload = {
         "model": str(MODEL or "auto"),
+        "chatgpt_image_intercept": False,
         "messages": [{"role": "user", "content": instruction}],
         "history_and_training_disabled": False,
     }
