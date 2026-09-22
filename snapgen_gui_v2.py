@@ -872,6 +872,7 @@ try:
     g["has_ref_story_history"] = _imgmod.has_ref_story_conversation
     g["get_ref_story_title"] = _imgmod.get_ref_story_title
     g["ingest_ref_story_file"] = _imgmod.ingest_ref_story_file
+    g["send_ref_story_type_lock"] = _imgmod.send_ref_story_type_lock
     g["reset_story_face_history"] = _imgmod.reset_story_face_conversation
     g["has_story_face_history"] = _imgmod.has_story_face_conversation
     g["get_story_face_title"] = _imgmod.get_story_face_title

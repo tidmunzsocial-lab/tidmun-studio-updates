@@ -306,6 +306,22 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             )
         except Exception:
             pass
+
+    def _current_ref_story_type_id():
+        selected = normalize_story_type(story_type_by_label.get(ref_story_type_var.get(), "auto"))
+        if selected != "auto":
+            return selected
+        try:
+            context = json.loads((Path(BASE) / "prompt_ref_context.json").read_text(encoding="utf-8"))
+            story = context.get("story") if isinstance(context, dict) else {}
+            if isinstance(story, dict):
+                return normalize_story_type(
+                    story.get("story_type") or story.get("genre") or story.get("story_type_label")
+                )
+        except Exception:
+            pass
+        return "auto"
+
     ref_use_context_var.trace_add("write", _save_ref_page_settings)
     ref_story_type_var.trace_add("write", _save_ref_page_settings)
     tk.Checkbutton(
@@ -1892,6 +1908,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         if ref_job_running[0]:
             _ref_log("กำลังสร้างอยู่ — รอให้งานเดิมเสร็จก่อน")
             return
+        selected_story_type = _current_ref_story_type_id()
         # Auto buttons are Context-driven by definition.  A single manual Ref
         # follows the new checkbox and never reads Tk variables in the worker.
         context_enabled = bool(auto or ref_use_context_var.get())
@@ -1988,8 +2005,15 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                             break
                         run_one(idx, name)
                 if lock:
-                    with lock: run_all()
+                    with lock:
+                        send_type = g.get("send_ref_story_type_lock")
+                        if callable(send_type):
+                            send_type(selected_story_type, log_fn=_ref_log)
+                        run_all()
                 else:
+                    send_type = g.get("send_ref_story_type_lock")
+                    if callable(send_type):
+                        send_type(selected_story_type, log_fn=_ref_log)
                     run_all()
             except Exception as e:
                 root.after(0, lambda e=e: _ref_log(f"ERROR: {e}"))

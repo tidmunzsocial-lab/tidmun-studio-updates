@@ -10,6 +10,7 @@ import os, json, time, threading, urllib.request, urllib.error, base64, shutil, 
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from snapgen_story_types import normalize_story_type, story_type_profile
 
 # ── Config (override via set_config) ──────────────────────────────
 BRIDGE_URL = "http://127.0.0.1:8000"
@@ -44,7 +45,7 @@ _story_conversation = {
 _REF_STORY_STATE_PATH = _STORY_STATE_PATH.with_name("ref_story_conversation.json")
 _ref_story_conversation = {
     "conversation_id": None, "parent_message_id": None,
-    "account_alias": "",
+    "account_alias": "", "story_type_lock": "",
     "story_title": "", "story_hash": "",
 }
 _STORY_FACE_STATE_PATH = _STORY_STATE_PATH.with_name("story_face_conversation.json")
@@ -156,7 +157,10 @@ def _save_ref_story_conversation():
     _save_conversation(_REF_STORY_STATE_PATH, _ref_story_conversation)
 
 def reset_ref_story_conversation():
-    _ref_story_conversation.update(conversation_id=None, parent_message_id=None, account_alias="", story_title="", story_hash="")
+    _ref_story_conversation.update(
+        conversation_id=None, parent_message_id=None, account_alias="",
+        story_type_lock="", story_title="", story_hash="",
+    )
     _save_ref_story_conversation()
 
 def has_ref_story_conversation():
@@ -197,6 +201,82 @@ def update_ref_story_conversation(result):
         and _ref_story_conversation.get("parent_message_id")
     ):
         _save_ref_story_conversation()
+
+
+def send_ref_story_type_lock(story_type, *, log_fn=None):
+    """Send the selected story type rules once into the current Ref history."""
+    if not has_ref_story_conversation():
+        raise RuntimeError("ยังไม่มีประวัติ Ref สำหรับส่งประเภทเรื่อง")
+    story_type_id = normalize_story_type(story_type)
+    if _ref_story_conversation.get("story_type_lock") == story_type_id:
+        return False
+    _, profile = story_type_profile(story_type_id)
+    label = str(profile.get("label") or "อัตโนมัติตามบท")
+    rules = " ".join(
+        str(profile.get(key) or "").strip()
+        for key in ("world", "characters", "period", "costume", "avoid")
+        if str(profile.get(key) or "").strip()
+    )
+    if not rules:
+        rules = (
+            "ให้วิเคราะห์ประเภทจากบทจริงก่อนเลือกโลกเรื่อง ยุค ตัวละคร เสื้อผ้า วัสดุ สี แสง "
+            "และองค์ประกอบภาพ; ห้ามยัดกฎของเรื่องผีหรือวรรณคดีถ้าบทไม่ได้ระบุ"
+        )
+    instruction = (
+        "PROMPT-REF STORY TYPE LOCK — ใช้เป็นกฎกลางของการสร้าง Ref ต่อจากนี้ในประวัติเดิมนี้.\n"
+        f"story_type: {story_type_id}\n"
+        f"ประเภทเรื่อง: {label}\n"
+        f"DESIGN RULES: {rules}\n"
+        "รักษาข้อเท็จจริงจากบทเป็นหลัก กฎประเภทนี้ใช้กำกับโลกเรื่อง ยุค รูปลักษณ์ ตัวละคร "
+        "เสื้อผ้า วัสดุ สี แสง และสถาปัตยกรรมให้ไปในทิศทางเดียวกัน. "
+        "ห้ามเปลี่ยนเรื่องให้เป็นผี วรรณคดี หรือแฟนตาซีเพียงเพราะชื่อประเภท; "
+        "ถ้าข้อมูลในบทขัดกับกฎประเภท ให้ยึดบทและแจ้งความขัดแย้งสั้นๆ. "
+        "ตอบ TYPE_LOCKED พร้อมยืนยัน story_type เดียวเท่านั้น; ยังไม่ต้องสร้างภาพ."
+    )
+    log = log_fn or _log
+    payload = {
+        "model": str(MODEL or "auto"),
+        "messages": [{"role": "user", "content": instruction}],
+        "history_and_training_disabled": False,
+    }
+    payload.update(get_ref_story_request_context())
+    try:
+        log(f"[ประเภทเรื่อง] ส่งกฎ {label} เข้า GPT ในประวัติ Ref เดิม...")
+        with _queue_lock:
+            request = urllib.request.Request(
+                f"{BRIDGE_URL}/v1/chat/completions",
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {BRIDGE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                result = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ HTTP {exc.code}: {body}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ: {exc}") from exc
+    if isinstance(result.get("error"), dict):
+        raise RuntimeError(str(result["error"].get("message") or result["error"]))
+    previous_conversation_id = str(_ref_story_conversation.get("conversation_id") or "").strip()
+    returned_conversation_id = str(result.get("conversation_id") or "").strip()
+    returned_parent_message_id = str(result.get("parent_message_id") or "").strip()
+    if not returned_conversation_id or not returned_parent_message_id:
+        raise RuntimeError("Bridge รับกฎประเภทเรื่องแล้วแต่ไม่ส่ง cursor กลับมา")
+    if previous_conversation_id and returned_conversation_id != previous_conversation_id:
+        raise RuntimeError("Bridge เปิดประวัติใหม่แทนประวัติ Ref เดิมตอนส่งกฎประเภทเรื่อง")
+    previous_account = str(_ref_story_conversation.get("account_alias") or "").strip()
+    returned_account = str(result.get("chatgpt_account") or "").strip()
+    if previous_account and returned_account and returned_account != previous_account:
+        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติ Ref เดิมตอนส่งกฎประเภทเรื่อง")
+    update_ref_story_conversation(result)
+    _ref_story_conversation["story_type_lock"] = story_type_id
+    _save_ref_story_conversation()
+    log(f"[ประเภทเรื่อง] GPT รับกฎ {label} แล้ว — พร้อมสร้าง Ref")
+    return True
 
 def _load_story_face_conversation():
     _load_conversation(_STORY_FACE_STATE_PATH, _story_face_conversation)
