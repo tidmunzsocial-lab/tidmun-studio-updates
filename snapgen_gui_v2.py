@@ -873,6 +873,7 @@ try:
     g["get_ref_story_title"] = _imgmod.get_ref_story_title
     g["ingest_ref_story_file"] = _imgmod.ingest_ref_story_file
     g["send_ref_story_type_lock"] = _imgmod.send_ref_story_type_lock
+    g["invalidate_histories_for_account"] = _imgmod.invalidate_histories_for_account
     g["reset_story_face_history"] = _imgmod.reset_story_face_conversation
     g["has_story_face_history"] = _imgmod.has_story_face_conversation
     g["get_story_face_title"] = _imgmod.get_story_face_title
@@ -7964,6 +7965,19 @@ def _reset_prompt_ref_conversation():
     })
     _save_prompt_ref_conversation()
 
+
+def _invalidate_prompt_ref_for_account(active_account):
+    """Drop a Prompt-Ref cursor that belongs to a different Bridge account."""
+    active = str(active_account or "").strip().casefold()
+    bound = str(_prompt_ref_conversation.get("account_alias") or "").strip().casefold()
+    if not active or not bound or bound == active:
+        return False
+    _reset_prompt_ref_conversation()
+    return True
+
+
+g["invalidate_prompt_ref_for_account"] = _invalidate_prompt_ref_for_account
+
 def _prompt_ref_story_hash(story):
     normalized = str(story or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
@@ -14618,6 +14632,20 @@ def _install_better_bridge_manager():
                     log_to(log_box, f"กำลังสลับไปใช้ account: {account}")
                     ok = start_bridge(log_box, account)
                     if ok:
+                        invalidated = []
+                        invalidate_prompt = g.get("invalidate_prompt_ref_for_account")
+                        if callable(invalidate_prompt) and invalidate_prompt(account):
+                            invalidated.append("Prompt-Ref")
+                        invalidate_histories = g.get("invalidate_histories_for_account")
+                        if callable(invalidate_histories):
+                            invalidated.extend(invalidate_histories(account))
+                        if invalidated:
+                            log_to(
+                                log_box,
+                                "ล้าง cursor ประวัติที่ผูกกับ account เดิมแล้ว: "
+                                + ", ".join(dict.fromkeys(invalidated))
+                                + " — ต้องส่งบทใหม่ในบัญชีที่เลือก",
+                            )
                         log_to(log_box, f"✅ ใช้ account แล้ว: {account}")
                     def refresh_after_use():
                         try:

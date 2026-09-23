@@ -315,6 +315,26 @@ def reset_prop_conversation():
     _save_prop_conversation()
 
 
+def invalidate_histories_for_account(active_account):
+    """Drop cursors bound to another account after Bridge Use switches capture."""
+    active = str(active_account or "").strip().casefold()
+    if not active:
+        return []
+    histories = (
+        ("Image", _story_conversation, reset_story_conversation),
+        ("Ref", _ref_story_conversation, reset_ref_story_conversation),
+        ("Story Face", _story_face_conversation, reset_story_face_conversation),
+        ("Prop", _prop_conversation, reset_prop_conversation),
+    )
+    invalidated = []
+    for label, state, reset in histories:
+        bound = str(state.get("account_alias") or "").strip().casefold()
+        if bound and bound != active:
+            reset()
+            invalidated.append(label)
+    return invalidated
+
+
 _load_story_conversation()
 _load_ref_story_conversation()
 _load_story_face_conversation()
