@@ -16852,6 +16852,8 @@ def _build_story_face_prompt_from_character(character):
         "Mouth fully closed with relaxed closed lips; absolutely no visible teeth, no open mouth, no smile."
         + hair_rule +
         " Absolutely no bangs or loose strands covering forehead, temples, eyebrows, cheeks, jawline or ears. "
+        "No headwear, headband, tiara, crown, hair ornament, jewelry, earrings, nose ring, facial piercing, "
+        "necklace, choker, face paint, glitter, or decorative makeup. Keep the face, ears, and neck plain and unobstructed. "
         "Full forehead, cheeks, hairline and both ears visible. 85mm portrait lens. Age-accurate unretouched skin "
         "microdetail: visible pores, fine lines, wrinkles, crow's-feet, nasolabial folds, spots, freckles, moles, "
         "scars and uneven texture where appropriate. Older faces show pronounced authentic age lines. No beauty "

@@ -1018,6 +1018,22 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "overrides every earlier emotion or expression description."
         )
 
+    def _apply_clean_face_lock(prompt):
+        """Keep face assets clean while preserving real skin and identity marks."""
+        return str(prompt or "").rstrip() + (
+            "\n\nFINAL CLEAN FACE AND HAIR OVERRIDE — MANDATORY: keep the entire face portrait clean and "
+            "unobstructed. No jewelry or decorative accessory anywhere on the head, forehead, temples, eyebrows, "
+            "ears, nose, cheeks, lips, jaw, or neck: no headband, tiara, crown, forehead chain, bindi, jewel, "
+            "hair ornament, earrings, ear cuffs, nose ring, facial piercing, necklace, choker, collar ornament, "
+            "face paint, glitter, or decorative makeup. Use plain unobstructed ears and a plain unobstructed neck. "
+            "Hair must stay fully behind the head and ears with the complete hairline, forehead, temples, eyebrows, "
+            "cheeks, jawline, and ears visible; no bangs, fringe, wisps, curls, side locks, or stray strands crossing "
+            "the face. Preserve only natural skin features and identity marks explicitly required by the target, such "
+            "as pores, fine lines, wrinkles, freckles, moles, scars, or texture. Do not replace skin detail with "
+            "smooth beauty skin. This clean-face instruction overrides earlier clothing, grooming, accessory, "
+            "headwear, jewelry, and hairstyle details."
+        )
+
     def _apply_face_age_override(prompt, age_label):
         age_rules = {
             "เด็ก": "an 8-year-old child with unmistakable child facial proportions",
@@ -1532,6 +1548,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         _apply_final_face_lighting_lock(final_prompt)
                     )
                     final_prompt = _apply_face_age_override(final_prompt, age_label)
+                    final_prompt = _apply_clean_face_lock(final_prompt)
 
                     front_payload = _build_story_face_payload(final_prompt)
                     front_payload["_use_story_face_history"] = True
@@ -2084,6 +2101,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         _apply_final_face_lighting_lock(final_prompt)
                     )
                     final_prompt = _apply_face_age_override(final_prompt, age_label)
+                    final_prompt = _apply_clean_face_lock(final_prompt)
                     payload = _build_story_face_payload(final_prompt)
                     payload["_use_story_face_history"] = True
                     if identity_images:
