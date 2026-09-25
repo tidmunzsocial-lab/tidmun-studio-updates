@@ -1586,8 +1586,6 @@ if callable(_orig_append_log_safe):
                     "parent_message_id": str(_prompt_ref_conversation["parent_message_id"]),
                     "account_alias": str(_prompt_ref_conversation.get("account_alias") or ""),
                 }
-            elif not image_gen.get_image_story_cursor():
-                raise RuntimeError("ยังไม่มีประวัติเรื่องที่ส่งบทแล้ว — ส่งบทเพียงครั้งเดียวก่อนใช้งาน")
         except Exception as exc:
             g["append_log"](index, "GPT Video Prompt: " + str(exc))
             return
@@ -1605,7 +1603,7 @@ if callable(_orig_append_log_safe):
             pass
         g["append_log"](
             index,
-            "GPT กำลังดูรูปและเขียน Video Prompt ในประวัติเรื่องเดียวกับหน้า Image AI...",
+            "GPT กำลังดูรูปและเขียน Video Prompt...",
         )
 
         def log_from_worker(message):

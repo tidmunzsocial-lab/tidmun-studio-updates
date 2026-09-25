@@ -630,13 +630,13 @@ def generate_video_prompt_from_story_image(
     log_fn=None,
     history_cursor=None,
 ):
-    """Attach the real Slot image directly to Image AI's story chat once."""
+    """Write a Video Prompt from the Slot image, continuing a story cursor when available."""
     source = Path(str(image_path or "")).expanduser().resolve()
     if not source.is_file():
         raise RuntimeError(f"ไม่พบรูปใน Slot: {source}")
     cursor = history_cursor or get_image_story_cursor()
-    if not cursor or not (cursor.get("conversation_id") and cursor.get("parent_message_id")):
-        raise RuntimeError("ยังไม่มีประวัติเรื่องที่ส่งบทแล้ว")
+    if cursor and not (cursor.get("conversation_id") and cursor.get("parent_message_id")):
+        cursor = None
 
     log = log_fn or _log
     slot_text = f"Slot {int(slot_number)}" if slot_number is not None else "Video Slot"
@@ -657,7 +657,7 @@ def generate_video_prompt_from_story_image(
         prevent_turn_back=prevent_turn_back,
     )
 
-    requested_conversation_id = str(cursor["conversation_id"]).strip()
+    requested_conversation_id = str(cursor.get("conversation_id") or "").strip() if cursor else ""
     payload = {
         "model": "chatgpt-web/auto",
         "thinking_effort": "standard",
@@ -667,25 +667,29 @@ def generate_video_prompt_from_story_image(
             "name": "slot_video_prompt.jpg",
             "data_url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"),
         }],
-        "metadata": {
+    }
+    if cursor:
+        payload["metadata"] = {
             "conversation_id": requested_conversation_id,
             "parent_message_id": cursor["parent_message_id"],
-        },
-    }
-    if cursor.get("account_alias"):
+        }
+    else:
+        payload["temporary_chat"] = True
+    if cursor and cursor.get("account_alias"):
         payload["chatgpt_account"] = cursor["account_alias"]
 
-    log(f"[GPT Video Prompt] กำลังส่งรูปของ {slot_text} เข้าแชตเรื่องเดิมโดยตรง...")
+    log(f"[GPT Video Prompt] กำลังดูรูปของ {slot_text}...")
     try:
         with _queue_lock:
             # Use the newest cursor when this request reaches the queue.
-            latest = get_image_story_cursor() if history_cursor is None else cursor
-            if not latest or str(latest.get("conversation_id") or "") != requested_conversation_id:
-                raise RuntimeError("ประวัติเรื่องเปลี่ยนระหว่างรอคิว กรุณากดส่งใหม่")
-            payload["metadata"] = {
-                "conversation_id": latest["conversation_id"],
-                "parent_message_id": latest["parent_message_id"],
-            }
+            if cursor:
+                latest = get_image_story_cursor() if history_cursor is None else cursor
+                if not latest or str(latest.get("conversation_id") or "") != requested_conversation_id:
+                    raise RuntimeError("ประวัติเรื่องเปลี่ยนระหว่างรอคิว กรุณากดส่งใหม่")
+                payload["metadata"] = {
+                    "conversation_id": latest["conversation_id"],
+                    "parent_message_id": latest["parent_message_id"],
+                }
             request = urllib.request.Request(
                 f"{BRIDGE_URL}/v1/chatgpt/vision",
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -707,9 +711,9 @@ def generate_video_prompt_from_story_image(
         raise RuntimeError(str(result["error"].get("message") or result["error"]))
     conversation_id = str(result.get("conversation_id") or "").strip()
     parent_message_id = str(result.get("parent_message_id") or "").strip()
-    if not conversation_id or not parent_message_id:
+    if cursor and (not conversation_id or not parent_message_id):
         raise RuntimeError("Bridge ตอบกลับแต่ไม่คืนรหัสประวัติ")
-    if conversation_id != requested_conversation_id:
+    if cursor and conversation_id != requested_conversation_id:
         raise RuntimeError("Bridge เปิดแชตใหม่แทนประวัติเรื่องหลัก — ยกเลิกผลลัพธ์")
 
     answer = str(
@@ -733,12 +737,12 @@ def generate_video_prompt_from_story_image(
             "the head or face toward the camera."
         )
 
-    if history_cursor is None:
+    if cursor and history_cursor is None:
         _story_conversation["conversation_id"] = conversation_id
         _story_conversation["parent_message_id"] = parent_message_id
         _story_conversation["account_alias"] = str(result.get("chatgpt_account") or cursor.get("account_alias") or "")
         _save_story_conversation()
-    else:
+    elif cursor:
         history_cursor["parent_message_id"] = parent_message_id
         history_cursor["account_alias"] = str(result.get("chatgpt_account") or cursor.get("account_alias") or "")
     log(f"[GPT Video Prompt] พร้อมแล้วสำหรับ {slot_text}")
