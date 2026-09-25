@@ -1578,10 +1578,16 @@ if callable(_orig_append_log_safe):
 
         try:
             import snapgen_image_gen as image_gen
-            if not image_gen.has_story_conversation():
-                raise RuntimeError(
-                    "ยังไม่มีประวัติเรื่องของหน้า Image AI — กดเริ่มประวัติใหม่และส่งบทก่อน"
-                )
+            prompt_ref_history = _prompt_ref_cursor_ready()
+            history_cursor = None
+            if prompt_ref_history:
+                history_cursor = {
+                    "conversation_id": str(_prompt_ref_conversation["conversation_id"]),
+                    "parent_message_id": str(_prompt_ref_conversation["parent_message_id"]),
+                    "account_alias": str(_prompt_ref_conversation.get("account_alias") or ""),
+                }
+            elif not image_gen.get_image_story_cursor():
+                raise RuntimeError("ยังไม่มีประวัติเรื่องที่ส่งบทแล้ว — ส่งบทเพียงครั้งเดียวก่อนใช้งาน")
         except Exception as exc:
             g["append_log"](index, "GPT Video Prompt: " + str(exc))
             return
@@ -1617,9 +1623,15 @@ if callable(_orig_append_log_safe):
                     prevent_turn_back=bool(_video_no_turn_back_vars[index].get()),
                     model_name=current_model_name,
                     log_fn=log_from_worker,
+                    history_cursor=history_cursor,
                 )
 
                 def complete(text=answer):
+                    if history_cursor is not None:
+                        if str(_prompt_ref_conversation.get("conversation_id") or "") == history_cursor["conversation_id"]:
+                            _prompt_ref_conversation["parent_message_id"] = history_cursor["parent_message_id"]
+                            _prompt_ref_conversation["account_alias"] = history_cursor["account_alias"]
+                            _save_prompt_ref_conversation()
                     prompts[index].delete("1.0", tk.END)
                     prompts[index].insert("1.0", text)
                     prompts[index].focus_set()
@@ -11512,6 +11524,9 @@ def _open_prompt_bank_ai():
             return "\n".join(parts)
         return raw
     def send_full_story():
+        if _prompt_ref_cursor_ready():
+            g["show_error"]("ประวัติเรื่องเดิมยังอยู่", "กด เริ่มเรื่องใหม่ ก่อน หากต้องการส่งบททั้งเรื่องเป็นเรื่องใหม่")
+            return
         full_story = story_box.get("1.0", tk.END).strip()
         if not full_story:
             g["show_error"]("บททั้งเรื่อง", "วางบททั้งเรื่องลงในช่องก่อน")
@@ -11788,6 +11803,35 @@ def _open_prompt_bank_ai():
     def run_prompt_ref_action():
         if _prompt_ref_context_history_ready():
             ai_make(False)
+        elif _prompt_ref_cursor_ready():
+            if not _prompt_ref_history_ready():
+                g["show_error"]("บทหลักไม่ตรงกับประวัติเดิม", "ตรวจไฟล์บทหลักของเรื่องนี้ก่อน — โปรแกรมจะไม่เริ่มแชตใหม่หรือส่งบทซ้ำให้อัตโนมัติ")
+                return
+            gen_btn.config(state="disabled")
+            set_status_light("#3B82F6", "กำลังสร้าง Context ต่อในประวัติเดิม...")
+
+            def worker():
+                try:
+                    with _bridge_queue_lock:
+                        _wait_bridge_free()
+                        raw_context = _build_prompt_ref_context_in_history()
+                        master = _write_context_master(data=raw_context, invent=False)
+                        encoded = json.dumps(master, ensure_ascii=False, indent=2)
+                        json_context_path.write_text(encoded + "\n", encoding="utf-8")
+
+                    def done():
+                        prompt_ref_context[0] = encoded
+                        gen_btn.config(state="normal", text="สร้าง Storyboard + Prompt")
+                        set_status_light("#22C55E", "Context พร้อมในประวัติเดิม — วางฉากแล้วกดสร้าง Storyboard + Prompt")
+                    root.after(0, done)
+                except Exception as exc:
+                    def fail(message=str(exc)):
+                        gen_btn.config(state="normal")
+                        set_status_light("#EF4444", "สร้าง Context ในประวัติเดิมไม่สำเร็จ")
+                        g["show_error"]("Prompt-Ref Context", friendly_gpt_error(message))
+                    root.after(0, fail)
+
+            threading.Thread(target=worker, daemon=True).start()
         else:
             send_full_story()
 
@@ -11796,7 +11840,9 @@ def _open_prompt_bank_ai():
     left = tk.Frame(row, bg=ui_bg); left.pack(side="left")
     gen_btn = _slot_button(
         row,
-        "สร้าง Storyboard + Prompt" if _prompt_ref_context_history_ready() else "เริ่มเรื่องจากบทนี้",
+        ("สร้าง Storyboard + Prompt" if _prompt_ref_context_history_ready()
+         else "สร้าง Context ในประวัติเดิม" if _prompt_ref_cursor_ready()
+         else "เริ่มเรื่องจากบทนี้"),
         run_prompt_ref_action,
         "primary",
         width=18,
