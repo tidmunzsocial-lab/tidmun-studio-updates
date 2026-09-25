@@ -51,11 +51,30 @@ _ref_story_conversation = {
 _STORY_FACE_STATE_PATH = _STORY_STATE_PATH.with_name("story_face_conversation.json")
 _story_face_conversation = {
     "conversation_id": None, "parent_message_id": None,
+    "story_context_parent_message_id": "",
     "account_alias": "",
     "story_title": "", "story_hash": "",
 }
 _PROP_STATE_PATH = _STORY_STATE_PATH.with_name("prop_conversation.json")
 _prop_conversation = {"conversation_id": None, "parent_message_id": None, "account_alias": ""}
+
+STORY_FACE_DIVERSITY_LOCK = (
+    "STORY FACE DIVERSITY LOCK — สำหรับเรื่องนี้ ห้ามพยายามทำให้ใบหน้าของตัวละครต่างคนคล้ายกัน "
+    "หรือใช้ใบหน้าต้นแบบเดียวกัน. ออกแบบแต่ละ identity ให้เป็นคนละบุคคลอย่างชัดเจนตั้งแต่รูปหน้า "
+    "สัดส่วนหน้าผาก โหนกแก้ม กราม คาง รูปคิ้ว รูปตา ระยะห่างตา สันและปลายจมูก รูปปาก สีผิว อายุ "
+    "และตำหนิเฉพาะตัว. ห้ามปรับทุกคนให้เป็นใบหน้ามาตรฐานหล่อหรือสวยแบบเดียวกัน. "
+    "ใช้ภาพอ้างอิงซ้ำได้เฉพาะคนเดียวกันต่างวัยหรือต่างสภาพ; คนละ identity ห้ามใช้โครงหน้าเดียวกัน. "
+    "รักษาความแตกต่างนี้ไว้ใน Character Bible และทุกภาพต่อจากนี้. "
+    "ตอบ FACE_DIVERSITY_LOCKED พร้อมยืนยันว่าเข้าใจกฎนี้ และยังไม่ต้องสร้างภาพ."
+)
+
+
+def _with_story_face_diversity_lock(instruction):
+    """Add the per-story face separation rule without duplicating it on retries."""
+    text = str(instruction or "").strip()
+    if "STORY FACE DIVERSITY LOCK" in text:
+        return text
+    return f"{text}\n\n{STORY_FACE_DIVERSITY_LOCK}" if text else STORY_FACE_DIVERSITY_LOCK
 
 def _story_hash(content):
     normalized = bytes(content or b"").decode("utf-8", errors="replace")
@@ -287,7 +306,14 @@ def _save_story_face_conversation():
 
 def reset_story_face_conversation():
     """Reset only Story 3D history; Image AI and Ref histories stay untouched."""
-    _story_face_conversation.update(conversation_id=None, parent_message_id=None, account_alias="", story_title="", story_hash="")
+    _story_face_conversation.update(
+        conversation_id=None,
+        parent_message_id=None,
+        story_context_parent_message_id="",
+        account_alias="",
+        story_title="",
+        story_hash="",
+    )
     _save_story_face_conversation()
 
 def has_story_face_conversation():
@@ -442,6 +468,8 @@ def ensure_latest_storyboard_context(*, log_fn=None):
         return {"sent": False, "reason": "no_storyboard_image"}
 
     log = log_fn or _log
+    storyboard_story_hash = str(meta.get("context_hash") or meta.get("story_hash") or "").strip()
+    started_new_history = False
     if not has_story_conversation():
         story_path = _STORY_STATE_PATH.parent.parent / "prompt_ref_source.txt"
         try:
@@ -458,6 +486,16 @@ def ensure_latest_storyboard_context(*, log_fn=None):
             story_bytes,
             log_fn=log,
         )
+        started_new_history = True
+
+    current_story_hash = str(_story_conversation.get("story_hash") or "").strip()
+    if storyboard_story_hash and current_story_hash and storyboard_story_hash != current_story_hash:
+        return {"sent": False, "reason": "storyboard_from_other_story"}
+    if started_new_history and not storyboard_story_hash:
+        # A legacy metadata file without a story hash cannot be proven to
+        # belong to the new story. Wait for the current Storyboard generation
+        # to mark itself in this history instead of importing an old board.
+        return {"sent": False, "reason": "unverified_storyboard_story"}
 
     # Include the instruction version so a changed storyboard-use rule is sent
     # once again even when the image file itself has not changed.
@@ -507,6 +545,32 @@ def ensure_latest_storyboard_context(*, log_fn=None):
         "storyboard_path": str(source),
         "acknowledgement": acknowledgement,
     }
+
+
+def mark_storyboard_context_registered(source_path):
+    """Mark a Storyboard image already generated in Image AI history.
+
+    Prompt-Ref's direct Storyboard flow now generates through the Image AI
+    history itself. Recording the file here prevents the next image request
+    from uploading the same Storyboard a second time as a separate vision turn.
+    """
+    source = Path(str(source_path or "")).expanduser()
+    try:
+        source = source.resolve()
+    except OSError:
+        pass
+    if not source.is_file() or source.stat().st_size <= 0:
+        return False
+    if not has_story_conversation():
+        return False
+    digest = hashlib.sha256(source.read_bytes() + b"|storyboard-panel-direct-v2").hexdigest()
+    _story_conversation["storyboard_hash"] = digest
+    _story_conversation["storyboard_path"] = str(source)
+    _story_conversation["storyboard_conversation_id"] = str(
+        _story_conversation.get("conversation_id") or ""
+    )
+    _save_story_conversation()
+    return True
 
 
 def _video_prompt_instruction(current_prompt="", prevent_turn_back=False):
@@ -758,6 +822,7 @@ def generate_prompt_ref_storyboard_json_from_image(
 def _ingest_story_file_into(
     state, save_fn, story_title, filename, file_bytes, *, purpose,
     log_fn=None, attach_file=True, instruction_override=None,
+    story_face_lock=False, continue_history=False,
 ):
     name = str(filename or "story.txt").strip() or "story.txt"
     content = bytes(file_bytes or b"")
@@ -770,6 +835,8 @@ def _ingest_story_file_into(
         "อ่านให้ครบและจำตัวละคร บทบาท ความสัมพันธ์ ยุค ฐานะ รูปลักษณ์ เสื้อผ้าที่เหมาะกับเหตุการณ์ "
         "สถานที่ และข้อเท็จจริงของเรื่องไว้ในประวัตินี้ ยังไม่ต้องสร้างภาพ ตอบ STORY_READY พร้อมสรุปหนึ่งประโยค"
     )
+    if story_face_lock:
+        instruction = _with_story_face_diversity_lock(instruction)
     story_text = content.decode("utf-8", errors="replace")
     if attach_file:
         message_content = [
@@ -790,6 +857,17 @@ def _ingest_story_file_into(
             "history_and_training_disabled": False,
             "metadata": {"chatgpt_image_intercept": False},
         }
+        if (
+            continue_history
+            and state.get("conversation_id")
+            and state.get("parent_message_id")
+        ):
+            payload["metadata"].update({
+                "conversation_id": state["conversation_id"],
+                "parent_message_id": state["parent_message_id"],
+            })
+            if state.get("account_alias"):
+                payload["chatgpt_account"] = state["account_alias"]
         req = urllib.request.Request(
             f"{BRIDGE_URL}/v1/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -831,8 +909,20 @@ def _ingest_story_file_into(
     parent_message_id = result.get("parent_message_id")
     if not conversation_id or not parent_message_id:
         raise RuntimeError("Bridge รับบทแล้วแต่ไม่ส่งรหัสประวัติกลับมา")
+    previous_conversation_id = str(state.get("conversation_id") or "").strip()
+    if continue_history and previous_conversation_id and str(conversation_id) != previous_conversation_id:
+        raise RuntimeError("Bridge เปิดประวัติใหม่แทนประวัติ Story Face เดิม — ยกเลิกเพื่อไม่ให้เรื่องปนกัน")
+    previous_account = str(state.get("account_alias") or "").strip()
+    returned_account = str(result.get("chatgpt_account") or "").strip()
+    if continue_history and previous_account and returned_account and returned_account != previous_account:
+        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติ Story Face เดิม — ยกเลิกเพื่อไม่ให้เรื่องปนกัน")
     state["conversation_id"] = str(conversation_id)
     state["parent_message_id"] = str(parent_message_id)
+    if state is _story_face_conversation:
+        # Keep image requests in this story's conversation, but branch every
+        # image from the latest text/Character-Bible turn instead of chaining
+        # one generated face into the next character's visual context.
+        state["story_context_parent_message_id"] = str(parent_message_id)
     state["account_alias"] = str(result.get("chatgpt_account") or "")
     state["story_title"] = title
     state["story_hash"] = _story_hash(content)
@@ -874,22 +964,32 @@ def ingest_story_face_file(story_title, filename, file_bytes, *, log_fn=None):
         _story_face_conversation, _save_story_face_conversation,
         story_title, filename, file_bytes,
         purpose="งานนิทาน 3D ใบหน้าตัวละครและเสื้อผ้า", log_fn=log_fn,
+        story_face_lock=True,
     )
 
 
 def analyze_story_face_dataset(story_title, text, instruction, *, log_fn=None):
     """Analyze Story Face rows inside the history later used to generate faces."""
-    reset_story_face_conversation()
+    source = str(text or "").strip()
+    if not source:
+        raise RuntimeError("ข้อมูลชุดนิทานว่าง")
+    source_hash = _story_hash(source.encode("utf-8"))
+    existing_hash = get_story_face_hash()
+    continue_history = bool(has_story_face_conversation())
+    if continue_history and existing_hash and existing_hash != source_hash:
+        raise RuntimeError("ข้อมูลชุดนิทานไม่ตรงกับประวัติ Story Face เดิม — กด เปลี่ยนเรื่อง ก่อนวิเคราะห์ใหม่")
     return _ingest_story_file_into(
         _story_face_conversation,
         _save_story_face_conversation,
         story_title,
         "story-face-dataset.txt",
-        str(text or "").encode("utf-8"),
+        source.encode("utf-8"),
         purpose="วิเคราะห์ Character Bible และสร้างใบหน้าตัวละคร",
         log_fn=log_fn,
         attach_file=False,
         instruction_override=instruction,
+        story_face_lock=True,
+        continue_history=continue_history,
     )
 
 def set_config(*, bridge_url=None, bridge_key=None, model=None,
@@ -1162,7 +1262,10 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
     elif use_story_face_history and _story_face_conversation["conversation_id"] and _story_face_conversation.get("account_alias"):
         payload["metadata"] = {
             "conversation_id": _story_face_conversation["conversation_id"],
-            "parent_message_id": _story_face_conversation["parent_message_id"],
+            "parent_message_id": (
+                _story_face_conversation.get("story_context_parent_message_id")
+                or _story_face_conversation["parent_message_id"]
+            ),
         }
         payload["chatgpt_account"] = _story_face_conversation["account_alias"]
     elif use_prop_history and _prop_conversation["conversation_id"] and _prop_conversation.get("account_alias"):
@@ -1174,7 +1277,10 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
     elif isinstance(conversation_state, dict) and conversation_state.get("conversation_id") and conversation_state.get("account_alias"):
         payload["metadata"] = {
             "conversation_id": conversation_state["conversation_id"],
-            "parent_message_id": conversation_state["parent_message_id"],
+            "parent_message_id": (
+                conversation_state.get("story_context_parent_message_id")
+                or conversation_state["parent_message_id"]
+            ),
         }
         payload["chatgpt_account"] = conversation_state["account_alias"]
 
@@ -1221,7 +1327,12 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                 if current_history and current_history.get("conversation_id") and current_history.get("parent_message_id"):
                     payload["metadata"] = {
                         "conversation_id": current_history["conversation_id"],
-                        "parent_message_id": current_history["parent_message_id"],
+                        "parent_message_id": (
+                            current_history.get("story_context_parent_message_id")
+                            or current_history["parent_message_id"]
+                            if current_history.get("story_context_parent_message_id")
+                            else current_history["parent_message_id"]
+                        ),
                     }
                     if current_history.get("account_alias"):
                         payload["chatgpt_account"] = current_history["account_alias"]

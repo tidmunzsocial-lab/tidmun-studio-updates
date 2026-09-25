@@ -921,12 +921,20 @@ try:
     g["_imgmod"] = _imgmod
 
     def _invalidate_downstream_story_histories():
-        """A changed/cleared Prompt-Ref story is not yet ingested by Image or Ref."""
-        for reset_key in ("reset_image_story_history", "reset_ref_story_history"):
+        """A changed/cleared Prompt-Ref story must not reuse downstream cursors."""
+        for reset_key in (
+            "reset_image_story_history",
+            "reset_ref_story_history",
+            "reset_story_face_history",
+        ):
             reset_fn = g.get(reset_key)
             if callable(reset_fn):
                 reset_fn()
-        for var_key in ("img_story_title_var", "ref_story_title_var"):
+        for var_key in (
+            "img_story_title_var",
+            "ref_story_title_var",
+            "story_face_title_var",
+        ):
             value_var = g.get(var_key)
             if value_var is not None:
                 try:
@@ -7978,6 +7986,24 @@ def _invalidate_prompt_ref_for_account(active_account):
 
 g["invalidate_prompt_ref_for_account"] = _invalidate_prompt_ref_for_account
 
+
+def _sync_persisted_histories_to_account(active_account):
+    """Drop every saved cursor that cannot run on the active local Bridge."""
+    active = str(active_account or "").strip()
+    if not active or active.casefold() in {"free", "default"}:
+        return []
+    invalidated = []
+    invalidate_prompt = g.get("invalidate_prompt_ref_for_account")
+    if callable(invalidate_prompt) and invalidate_prompt(active):
+        invalidated.append("Prompt-Ref")
+    invalidate_histories = g.get("invalidate_histories_for_account")
+    if callable(invalidate_histories):
+        invalidated.extend(invalidate_histories(active))
+    return list(dict.fromkeys(invalidated))
+
+
+g["sync_persisted_histories_to_account"] = _sync_persisted_histories_to_account
+
 def _prompt_ref_story_hash(story):
     normalized = str(story or "").replace("\r\n", "\n").replace("\r", "\n").strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest() if normalized else ""
@@ -8483,6 +8509,25 @@ def _write_story_run(run):
     _story_save_run(BASE, run)
 
 
+def _register_generated_storyboard(path, *, source="image_page"):
+    """Bind a newly generated Storyboard to the current story run."""
+    candidate = Path(str(path or "")).expanduser()
+    if not candidate.is_file() or candidate.stat().st_size <= 0:
+        return False
+    run = _active_story_run()
+    if not run or run.get("status") not in {"running", "ready"}:
+        return False
+    run["storyboard_path"] = str(candidate.resolve())
+    run["storyboard_source"] = str(source or "image_page")
+    run["storyboard_updated_at"] = time.time()
+    if not run.get("panel_count"):
+        count = sum(1 for item in run.get("image_entries") or [] if isinstance(item, dict))
+        if 2 <= count <= 12:
+            run["panel_count"] = count
+    _write_story_run(run)
+    return True
+
+
 def _story_run_for_prompt(prompt_index=None):
     run = _active_story_run()
     if not run:
@@ -8526,6 +8571,7 @@ def _story_ref_age_allowed(path, prompt):
     )
 
 
+g["_register_generated_storyboard"] = _register_generated_storyboard
 g["_story_run_for_prompt"] = _story_run_for_prompt
 g["_story_current_scene_text"] = lambda run_id=None: _story_current_scene_text(BASE, run_id)
 g["_storyboard_panel_crop"] = _storyboard_panel_crop
@@ -8675,13 +8721,7 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
     log_fn("[2/3] จับคู่ไฟล์เรฟจากผลวิเคราะห์")
     ref_paths, ref_names = _collect_prompt_ref_storyboard_refs(story_text, preflight)
     request_prompt = _build_prompt_ref_storyboard_image_request(story_text, preflight, ref_names)
-    history_conversation_id = str(_prompt_ref_conversation.get("conversation_id") or "")
-    history_parent_before = str(_prompt_ref_conversation.get("parent_message_id") or "")
-    cursor_before = {
-        "conversation_id": str(_prompt_ref_conversation.get("conversation_id") or ""),
-        "parent_message_id": str(_prompt_ref_conversation.get("parent_message_id") or ""),
-    }
-    log_fn("[3/3] ส่ง Storyboard เข้าประวัติเดียวกับหน้า Image AI พร้อมไฟล์เรฟ " + str(len(ref_paths)) + " รูป แล้วส่งรูปกลับมาแตก Prompt ในหน้าเดิม")
+    log_fn("[3/3] ส่ง Storyboard เข้าประวัติ Image AI เดิม พร้อมไฟล์เรฟ " + str(len(ref_paths)) + " รูป")
     encoded_refs = [base64.b64encode(Path(path).read_bytes()).decode("ascii") for path in ref_paths]
     output = _imgmod.generate_image(
         request_prompt,
@@ -8692,22 +8732,11 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         aspect_ratio="9:16",
         save_sidecar=False,
         log_fn=log_fn,
-        # Build the new Storyboard from the exact Prompt-Ref Context history,
-        # never from Image AI's previous Storyboard. After it is saved below,
-        # register this exact new board in Image AI before any scene is made.
-        use_story_history=False,
-        conversation_state=_prompt_ref_conversation,
-        conversation_save_fn=_save_prompt_ref_conversation,
+        # Every generated image, including Storyboard, belongs to Image AI's
+        # one persisted story history. Prompt-Ref remains the text/planning
+        # history, but it must never own an image-generation cursor.
+        use_story_history=True,
     )
-    if str(_prompt_ref_conversation.get("conversation_id") or "") != history_conversation_id:
-        escaped_conversation_id = str(_prompt_ref_conversation.get("conversation_id") or "")
-        _prompt_ref_conversation["conversation_id"] = history_conversation_id
-        _prompt_ref_conversation["parent_message_id"] = history_parent_before
-        _save_prompt_ref_conversation()
-        raise RuntimeError(
-            "Storyboard ถูกสร้างนอกประวัติ Context เดิม "
-            f"(เดิม {history_conversation_id}, ใหม่ {escaped_conversation_id}) — ยกเลิกผลลัพธ์นี้"
-        )
     output_path = Path(str(output))
     if not output_path.is_file() or output_path.stat().st_size <= 0:
         raise RuntimeError("สร้าง Storyboard แล้วแต่ไม่พบไฟล์ภาพ")
@@ -8740,16 +8769,9 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         "matched_ref_images": ref_paths,
         "matched_ref_names": ref_names,
         "reference_images_disabled": False,
-        "cursor_before": cursor_before,
-        "cursor_after": {
-            "conversation_id": str(_prompt_ref_conversation.get("conversation_id") or ""),
-            "parent_message_id": str(_prompt_ref_conversation.get("parent_message_id") or ""),
-        },
+        "context_hash": str(_prompt_ref_conversation.get("story_hash") or ""),
         "history_chain": {
-            "context_conversation_id": str(_prompt_ref_conversation.get("context_conversation_id") or ""),
-            "context_parent_message_id": str(_prompt_ref_conversation.get("context_parent_message_id") or ""),
-            "storyboard_parent_before": history_parent_before,
-            "storyboard_parent_after": str(_prompt_ref_conversation.get("parent_message_id") or ""),
+            "owner": "image_ai",
             "same_conversation": True,
         },
     }
@@ -8757,10 +8779,9 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    # Register every newly generated Storyboard in Image AI immediately.  The
-    # shared helper also starts Image AI's story history from Prompt-Ref when
-    # this is the first Storyboard, so users never need to press New History.
-    _imgmod.ensure_latest_storyboard_context(log_fn=log_fn)
+    # The image request above already advanced Image AI's cursor. Mark this
+    # exact file as present in that history instead of uploading it again.
+    _imgmod.mark_storyboard_context_registered(output_path)
     return str(output_path)
 def _build_prompt_ref_storyboard_analysis_request(story_text):
     story = str(story_text or "").strip()
@@ -9660,8 +9681,11 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
     # The result is persisted in PROMPT_REF_STORYBOARD_IMAGE_META for audit.
     conversation_id = str(_prompt_ref_conversation.get("conversation_id") or "").strip()
     context_conversation_id = str(_prompt_ref_conversation.get("context_conversation_id") or "").strip()
+    parent_message_id = str(_prompt_ref_conversation.get("parent_message_id") or "").strip()
     if not conversation_id or conversation_id != context_conversation_id:
         raise RuntimeError("Prompt-Ref ไม่ตรงกับแชต Context เดิม")
+    if not parent_message_id:
+        raise RuntimeError("Prompt-Ref ไม่มี cursor สำหรับต่อประวัติเดิม")
 
     character_context = _load_prompt_ref_storyboard_character_context(scene_text)
     ref_context = _load_prompt_ref_storyboard_ref_context(scene_text)
@@ -9694,9 +9718,18 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
             "name": "prompt_ref_storyboard.jpg",
             "data_url": "data:image/jpeg;base64," + base64.b64encode(image_bytes).decode("ascii"),
         }],
-        "temporary_chat": True,
-        "chatgpt_account": str(_prompt_ref_conversation.get("account_alias") or "account-1"),
+        # Keep the image analysis in the same Prompt-Ref conversation.  The
+        # Bridge switches to normal continuation whenever these two cursors
+        # are supplied, so the image and its JSON result share one history.
+        "temporary_chat": False,
+        "metadata": {
+            "conversation_id": conversation_id,
+            "parent_message_id": parent_message_id,
+        },
     }
+    bound_account = str(_prompt_ref_conversation.get("account_alias") or "").strip()
+    if bound_account:
+        vision_payload["chatgpt_account"] = bound_account
     request = urllib.request.Request(
         "http://127.0.0.1:8000/v1/chatgpt/vision",
         data=json.dumps(vision_payload, ensure_ascii=False).encode("utf-8"),
@@ -9710,6 +9743,30 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
         body = exc.read().decode("utf-8", errors="replace")[:1800]
         raise RuntimeError(f"GPT อ่าน Storyboard ไม่สำเร็จ HTTP {exc.code}: {body}") from exc
 
+    if vision_result.get("error"):
+        raise RuntimeError(json.dumps(vision_result["error"], ensure_ascii=False))
+    returned_conversation_id, returned_parent_message_id = _extract_bridge_cursor(vision_result)
+    if not returned_conversation_id or not returned_parent_message_id:
+        raise RuntimeError("GPT อ่าน Storyboard แล้วไม่คืน cursor ของประวัติ Prompt-Ref เดิม")
+    if str(returned_conversation_id) != conversation_id:
+        raise RuntimeError(
+            "GPT อ่าน Storyboard แล้วหลุดไปประวัติใหม่ "
+            f"(เดิม {conversation_id}, ใหม่ {returned_conversation_id}) — ยกเลิกเพื่อไม่ให้เรื่องแยก"
+        )
+    response_account = str(vision_result.get("chatgpt_account") or "").strip()
+    previous_account = str(_prompt_ref_conversation.get("account_alias") or "").strip()
+    if previous_account and response_account and response_account != previous_account:
+        raise RuntimeError(
+            "Bridge ใช้บัญชีไม่ตรงกับประวัติ Prompt-Ref "
+            f"(ประวัตินี้={previous_account}, คำขอนี้={response_account}) — ยกเลิกเพื่อไม่ให้แชตแยกบัญชี"
+        )
+    _prompt_ref_conversation["conversation_id"] = str(returned_conversation_id)
+    _prompt_ref_conversation["parent_message_id"] = str(returned_parent_message_id)
+    _prompt_ref_conversation["conversation_url"] = f"https://chatgpt.com/c/{returned_conversation_id}"
+    if response_account:
+        _prompt_ref_conversation["account_alias"] = response_account
+    _save_prompt_ref_conversation()
+
     raw = str(vision_result.get("text") or "").strip()
     if not raw:
         raise RuntimeError("GPT ไม่ได้ส่ง JSON จากภาพ Storyboard")
@@ -9719,8 +9776,8 @@ def _generate_prompts_from_storyboard_image(storyboard_image_path, scene_text=""
     payload = _normalize_storyboard_character_labels(payload, character_context)
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
-    # Write the exact result back into the original Prompt-Ref history. This is
-    # a text-only turn, so it cannot create or switch to an Image AI history.
+    # Keep the normalized JSON in the same Prompt-Ref history after the image
+    # turn, so later calls continue from the same conversation cursor.
     final_payload = payload
     try:
         persisted = _prompt_ref_chat([
@@ -11444,7 +11501,7 @@ def _open_prompt_bank_ai():
             if friendly_msg != raw:
                 return friendly_msg
         if "429" in raw or "Too many requests" in raw or "chatgpt_rate_limited" in raw:
-            parts = ["ChatGPT 429/คิวเต็ม — SnapGen ไม่ส่งซ้ำแล้ว", "สาเหตุ: account-1 / chatgpt-web โดน rate limit จาก ChatGPT", "วิธีแก้: รอให้ limit reset หรือเปลี่ยน account แล้วลองใหม่"]
+            parts = ["ChatGPT 429/คิวเต็ม — SnapGen ไม่ส่งซ้ำแล้ว", "สาเหตุ: บัญชี ChatGPT ที่กำลังใช้โดน rate limit", "วิธีแก้: รอให้ limit reset หรือเปลี่ยน account แล้วลองใหม่"]
             m = re.search(r'"feature_name"\s*:\s*"image_gen".*?"remaining"\s*:\s*(\d+).*?"reset_after"\s*:\s*"([^"]+)"', raw, re.S)
             if m:
                 parts.append(f"image_gen เหลือ {m.group(1)} reset: {m.group(2)}")
@@ -11930,6 +11987,13 @@ def _run_prompt_ref_storyboard_workflow(story_text, progress=None):
             if not storyboard_path or not Path(storyboard_path).is_file():
                 raise RuntimeError("สร้างภาพ Storyboard ไม่สำเร็จ — ไม่มีไฟล์ภาพผลลัพธ์")
             storyboard_path = str(Path(storyboard_path).resolve())
+            # Publish the exact board to the active run before vision parsing.
+            # If parsing is retried or fails, the next scene still points at
+            # the board that was actually generated for this run.
+            run["storyboard_path"] = storyboard_path
+            run["storyboard_source"] = "prompt_ref"
+            run["storyboard_updated_at"] = time.time()
+            _write_story_run(run)
             emit("ขั้นที่ 2/3 · Storyboard พร้อม กำลังอ่านภาพทุกช่อง…")
             raw = _generate_prompts_from_storyboard_image(storyboard_path, story_text)
             video_entries, image_entries = _split_prompt_ref_output_modes(raw)
@@ -12476,8 +12540,6 @@ def _restore_image_mode_latest():
     def _api_base():
         fn=g.get("_api_base")
         return fn() if callable(fn) else g.get("CHATGPT_API_BASE", f"http://{BRIDGE_HOST}:{BRIDGE_PORT}/v1")
-    # Session continuity: shared across auto-gen queue so all 10 images stay in 1 ChatGPT conversation
-    _session_conv = {"conversation_id": None, "parent_message_id": None}
     def _do_image_request(payload, is_edit=False, prompt="", name_hint=None, raw_prompt=None, prompt_index=None, output_dir=None, save_sidecar=False):
         """ทุกปุ่มสร้างรูปเรียกโมดูล snapgen_image_gen.py ผ่าน adapter นี้."""
         p = prompt or raw_prompt or payload.get("prompt", "")
@@ -12514,6 +12576,10 @@ def _restore_image_mode_latest():
                 use_story_face_history=bool(payload.get("_use_story_face_history", False)),
                 use_prop_history=bool(payload.get("_use_prop_history", False)),
             )
+            if prompt_index == 11:
+                register_storyboard = g.get("_register_generated_storyboard")
+                if callable(register_storyboard):
+                    register_storyboard(generated_path, source="image_page")
             _remember_image_prompt_link(
                 generated_path,
                 prompt_index=prompt_index,
@@ -13258,9 +13324,9 @@ def _restore_image_mode_latest():
             "prompt": prompt,
             "aspect_ratio": aspect,
             "history_and_training_disabled": False,
-            # Image AI owns this history. Before the first scene of a new
-            # storyboard, snapgen_image_gen registers that storyboard once.
-            "_use_story_history": bool(_imgmod.has_story_conversation()),
+            # Every Image AI request uses the one persisted Image history.
+            # Only the explicit New Story action clears it.
+            "_use_story_history": True,
             "_story_run_id": run.get("run_id"),
             "_storyboard_path": run.get("storyboard_path"),
             "_reference_labels": list(stems),
@@ -13486,10 +13552,8 @@ def _restore_image_mode_latest():
             _set_image_action_buttons_running(True)
             _img_log(f"[auto] เริ่ม — Storyboard ก่อน, แล้วซีน {start_n}-{end_n} จาก {total} ซีน (ไม่รวม Storyboard)")
             def worker():
-                # 1. Storyboard first (Prompt 11, independent session)
+                # 1. Storyboard first (Prompt 11, same Image AI history)
                 root.after(0, lambda: _img_log("[auto] 🎬 Storyboard reference กำลังสร้าง..."))
-                _session_conv["conversation_id"] = None
-                _session_conv["parent_message_id"] = None
                 storyboard_path = None
                 try:
                     ts_email = tailscale_up()
@@ -13529,7 +13593,8 @@ def _restore_image_mode_latest():
                         + "DAY PRESET: " + day_light.rstrip(".") + ". "
                         + "NIGHT PRESET: " + night_light.rstrip(".") + "."
                     )
-                    payload = {"prompt": full, "aspect_ratio": aspect, "history_and_training_disabled": False}
+                    payload = {"prompt": full, "aspect_ratio": aspect, "history_and_training_disabled": False,
+                               "_use_story_history": True}
                     if sb_refs:
                         payload["images"] = [_encode_image_b64(pth) for pth in sb_refs]
                     with _bridge_queue_lock:
@@ -13546,7 +13611,7 @@ def _restore_image_mode_latest():
                 except Exception as e:
                     root.after(0, lambda msg=str(e): _img_log(f"[auto] ❌ Storyboard error: {msg} — ดำเนินต่อโดยไม่มี storyboard ref"))
                     storyboard_path = None
-                # 2. Each scene: independent session
+                # 2. Each scene: continue the same Image AI history
                 done = 0
                 prev_path = None
                 for n in queue_nums:
@@ -13554,8 +13619,6 @@ def _restore_image_mode_latest():
                         _img_log(f"[auto] หยุดแล้ว — เสร็จ {done}/{len(queue_nums)} ซีน")
                         break
                     p = prompts[n-1]
-                    _session_conv["conversation_id"] = None
-                    _session_conv["parent_message_id"] = None
                     root.after(0, lambda n=n: _img_log(f"[auto] ซีน {n}/{queue_nums[-1]} — กำลังสร้าง..."))
                     root.after(0, lambda p=p: (img_prompt_text.delete("1.0", tk.END), img_prompt_text.insert("1.0", p)))
                     try:
@@ -13599,6 +13662,7 @@ def _restore_image_mode_latest():
                         if storyboard_ref and os.path.exists(storyboard_ref):
                             full_prompt += STORYBOARD_CAMERA_ONLY_OVERRIDE
                         payload={"prompt":full_prompt,"aspect_ratio":aspect,"history_and_training_disabled":False,
+                                 "_use_story_history": True,
                                  "_story_run_id": run.get("run_id"), "_storyboard_path": run.get("storyboard_path"),
                                  "_reference_labels": list(stems)}
                         if ref_images: payload["images"]=[_encode_image_b64(pp) for pp in ref_images]
@@ -14632,13 +14696,7 @@ def _install_better_bridge_manager():
                     log_to(log_box, f"กำลังสลับไปใช้ account: {account}")
                     ok = start_bridge(log_box, account)
                     if ok:
-                        invalidated = []
-                        invalidate_prompt = g.get("invalidate_prompt_ref_for_account")
-                        if callable(invalidate_prompt) and invalidate_prompt(account):
-                            invalidated.append("Prompt-Ref")
-                        invalidate_histories = g.get("invalidate_histories_for_account")
-                        if callable(invalidate_histories):
-                            invalidated.extend(invalidate_histories(account))
+                        invalidated = _sync_persisted_histories_to_account(account)
                         if invalidated:
                             log_to(
                                 log_box,
@@ -15358,6 +15416,11 @@ def _install_image_bridge_status():
                         account = "ยังไม่มี Account" if no_saved_account else bridge_account_label(raw_account or "?")
                     current_account[0] = account
                     current_account_key[0] = raw_account
+                    # A project can arrive with cursors created on another
+                    # workstation/account. Reconcile them as soon as this
+                    # Bridge proves its active local account, before any page
+                    # can reuse the stale cursor in a request.
+                    _sync_persisted_histories_to_account(raw_account)
                     queue_info = data.get("image_queue") if isinstance(data.get("image_queue"), dict) else {}
                     image_running = int(queue_info.get("running", 0) or 0)
                     image_waiting = int(queue_info.get("waiting", 0) or 0)
@@ -16900,9 +16963,9 @@ def _build_story_face_prompt_from_character(character):
         )
         + f"Character details from prompt context: {context}. "
     )
-    max_chars = 2000
-    head_room = max(120, max_chars - len(rules) - 2)
-    return head[:head_room].rstrip(" ,;.") + ". " + rules
+    # Keep the complete character-specific geometry; Story Face bypasses the
+    # generic prompt rewriter and must not clip identity details by character count.
+    return head.rstrip(" ,;.") + ". " + rules
 
 
 def _build_story_face_payload(prompt):

@@ -112,19 +112,9 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     # right edge visually aligned with the box while separating it from title.
     top_actions = tk.Frame(story_header, bg=BG)
     top_actions.grid(row=0, column=2, sticky="e", padx=(8, 0))
-    for column in range(4):
+    for column in range(2):
         top_actions.columnconfigure(column, weight=1, uniform="image_top_action")
 
-    storyboard_btn = _btn(
-        top_actions, "Storyboard", ORANGE,
-        lambda: (g.get("generate_storyboard_overview_image") or (lambda: None))(),
-        padx=DEFAULT_PADX, pady=DEFAULT_PADY,
-    )
-    autogen_btn = _btn(
-        top_actions, "Auto-Gen", PINK,
-        lambda: (g.get("auto_gen_queue") or (lambda: None))(),
-        padx=DEFAULT_PADX, pady=DEFAULT_PADY,
-    )
     clear_gallery_btn = _btn(
         top_actions, "🧹 ล้างรูป", RED,
         lambda: (g.get("clear_gallery") or (lambda: None))(),
@@ -144,9 +134,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         highlightcolor="#93C5FD",
         bd=0,
     )
-    for column, button in enumerate(
-        (storyboard_btn, autogen_btn, clear_gallery_btn, new_story_btn)
-    ):
+    for column, button in enumerate((clear_gallery_btn, new_story_btn)):
         button.configure(width=DEFAULT_WIDTH)
         button.grid(
             row=0,
@@ -1930,14 +1918,12 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
             queue_nums = list(range(start_n, end_n + 1))
             auto_gen_state["running"] = True
             auto_gen_state["cancel"] = False
-            autogen_btn.config(text="หยุด Auto-Gen", bg=RED)
             gen_btn.config(state="disabled")
             _log(f"[auto] เริ่ม — สร้าง Storyboard ก่อน แล้วซีน {start_n}-{end_n} จาก {total} ซีน (ไม่รวม Storyboard)")
 
             def finish(done, total_count):
                 auto_gen_state["running"] = False
                 auto_gen_state["cancel"] = False
-                autogen_btn.config(text="Auto-Gen", bg=PINK)
                 gen_btn.config(state="normal")
                 _log(f"[auto] เสร็จทั้งหมด — {done}/{total_count} ซีน")
                 _notify_done()
@@ -2183,8 +2169,6 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
 
     gen_btn.config(command=lambda: _generate(False))
     prompt_btn.config(command=_pick_prompt)
-    storyboard_btn.config(command=_storyboard)
-    autogen_btn.config(command=_auto_gen)
     clear_gallery_btn.config(command=_clear_gallery)
     choose_btn.config(command=_browse_ref_folder)
     ref_clear_btn.config(command=_clear_ref_folder)
@@ -2291,7 +2275,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         "img_story_title_var": story_title_var,
         "img_story_file_var": story_file_var,
         "img_story_file_state": story_file_state,
-        "image_action_buttons": [gen_btn, prompt_btn, storyboard_btn, autogen_btn, clear_gallery_btn],
+        "image_action_buttons": [gen_btn, prompt_btn, clear_gallery_btn],
         "img_side_controls": side_controls,
         "img_character_frame": character_frame,
         "img_character_var": character_var,

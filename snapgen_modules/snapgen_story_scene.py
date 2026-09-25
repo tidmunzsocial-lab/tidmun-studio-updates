@@ -637,7 +637,7 @@ def install(g: dict, root: tk.Misc, parent: tk.Misc) -> dict:
 
         def worker():
             try:
-                payload = {"model": "auto", "prompt": prompt, "n": 1, "aspect_ratio": "16:9", "history_and_training_disabled": False}
+                payload = {"model": "auto", "prompt": prompt, "n": 1, "aspect_ratio": "16:9", "history_and_training_disabled": False, "_use_story_face_history": True}
                 out = do_request(payload, is_edit=False, prompt=prompt, name_hint=name, raw_prompt=prompt, output_dir=str(master_dir))
                 error = None
             except Exception as exc:
@@ -788,7 +788,7 @@ def install(g: dict, root: tk.Misc, parent: tk.Misc) -> dict:
 
         def worker():
             try:
-                payload = {"model": "auto", "prompt": prompt, "n": 1, "aspect_ratio": "1:1", "images": [master], "history_and_training_disabled": False}
+                payload = {"model": "auto", "prompt": prompt, "n": 1, "aspect_ratio": "1:1", "images": [master], "history_and_training_disabled": False, "_use_story_face_history": True}
                 out = do_request(payload, is_edit=True, prompt=prompt, name_hint=f"scene-part-{name}", raw_prompt=prompt, output_dir=str(parts_dir))
                 error = None
             except Exception as exc:

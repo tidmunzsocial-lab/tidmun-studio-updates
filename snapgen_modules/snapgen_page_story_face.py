@@ -222,6 +222,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     story_face_title_var = tk.StringVar(
         value=(g.get("get_story_face_title") or (lambda: ""))()
     )
+    g["story_face_title_var"] = story_face_title_var
     story_face_status_var = tk.StringVar(value="")
     tk.Label(story_history_row, text="เรื่อง:", bg="#FAFAF7", fg="#333", font=(SNAPGEN_UI_FONT, 9, "bold")).pack(side="left")
     tk.Label(
@@ -1133,6 +1134,30 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             name = suffix.sub("", name).strip(" -—:()")
         return name or str(character.get("name") or "").strip().casefold()
 
+    _CAST_FACE_PROFILES = (
+        "long narrow face, high forehead, deep-set close-set almond eyes, straight long nose, thin lips, narrow jaw and pointed chin",
+        "round broad face, low forehead, wide-set round eyes, short broad nose, full lips, soft jaw and rounded chin",
+        "square face, broad forehead, heavy straight brows, hooded eyes, strong nose bridge, wide jaw and flat chin",
+        "heart-shaped face, broad upper cheekbones, tapered jaw, slightly downturned eyes, narrow nose and defined cupid's bow",
+        "balanced oval face, medium forehead, medium-spaced almond eyes, gently arched brows, medium nose and soft jaw",
+        "rectangular face, low brow line, deep-set eyes, prominent cheekbones, broad nose and firm long jaw",
+        "diamond face, narrow forehead and jaw, very high cheekbones, wide-set eyes, narrow nose and small mouth",
+        "pear-shaped face, narrow forehead, full lower cheeks, slightly hooded eyes, broad jaw and round chin",
+        "asymmetrical oval face, one eyebrow naturally slightly higher, uneven cheek fullness, medium nose and tapered jaw",
+        "angular mature face, deep eye sockets, pronounced nasolabial folds, high cheekbones, long nose and strong chin",
+        "short wide face, low cheekbones, large close-set eyes, flat nose bridge, wide mouth and compact jaw",
+        "tall oval face, sloping forehead, narrow eyes with large spacing, prominent nose tip, thin upper lip and long chin",
+    )
+
+    def _assign_cast_face_profiles(characters):
+        """Give each identity a deterministic facial geometry so prompts cannot converge."""
+        mapping = {}
+        for character in characters or []:
+            key = _identity_family_key(character)
+            if key not in mapping:
+                mapping[key] = _CAST_FACE_PROFILES[len(mapping) % len(_CAST_FACE_PROFILES)]
+        return mapping
+
     def _reference_family_key(path):
         stem = Path(path).stem
         stem = re.sub(r"(?:[-_ ]face)(?:[-_ ]side)?(?:[-_ ]?\d+)?$", "", stem, flags=re.I)
@@ -1523,15 +1548,13 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 def request_images():
                     if "_wait_bridge_free" in globals():
                         globals()["_wait_bridge_free"](log_fn=_new_log)
-                    refine = g.get("_refine_prompt_via_ai") or globals().get("_refine_prompt_via_ai")
-                    if callable(refine):
-                        _new_log(f"[refine] ส่ง GPT แปลง prompt Face: {name}")
                     # Select already embeds only that character's details in
                     # `prompt`; manual input contains only what the user typed.
                     # Do not append the whole story context in either case.
-                    refined_prompt = refine(prompt, kind="face", use_context=False) if callable(refine) else prompt
-                    if refined_prompt != prompt:
-                        _new_log(f"[refine] ใช้ prompt ใหม่ ({len(refined_prompt)} chars)")
+                    # Keep the structured face description intact; the generic
+                    # rewriter can remove the exact geometry that distinguishes
+                    # this character from earlier faces in the same history.
+                    refined_prompt = prompt
                     refined_prompt = _append_condition_override(refined_prompt, selected_condition[0])
 
                     # Branch Body before face identity is re-applied. Headshot 3
@@ -1795,7 +1818,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "ตอบ JSON เท่านั้นในรูป {\"design_page\":\"...\",\"subjects\":[...]}. "
             "design_page ต้องเป็นแผนรวมทั้งเรื่องที่อธิบายความแตกต่างของทุกใบหน้าในหน้าเดียว. "
             "แต่ละ subject ต้องมี name, variant, identity_group, identity_master, reference_from, age, gender, "
-            "body_build, height, weight, role, life_condition, expression, appearance, face_design, skin_detail, "
+            "body_build, height, weight, role, life_condition, expression, appearance, face_design, face_profile, skin_detail, "
             "hair, clothes, source. gender ต้องเป็น male หรือ female ตามข้อมูล ห้ามปล่อยว่างเมื่อระบุเพศได้. "
             "identity_group คือรหัสคนจริงคนเดียวกัน ใช้ชื่อหลักสั้นคงที่ เช่น นายพยง; ทุกวัยและทุกอารมณ์ของคนเดียวกัน "
             "ต้องใช้ identity_group เดียวกัน. identity_master เป็น boolean: true ได้เพียงหนึ่ง subject ต่อ identity_group "
@@ -1849,7 +1872,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     key: str(item.get(key) or "").strip()
                     for key in (
                         "name", "variant", "identity_group", "reference_from", "age", "gender", "body_build", "height", "weight",
-                        "role", "life_condition", "expression", "appearance", "face_design", "skin_detail",
+                        "role", "life_condition", "expression", "appearance", "face_design", "face_profile", "skin_detail",
                         "hair", "clothes", "source",
                     )
                 }
@@ -1921,7 +1944,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             return "3D AGE: visibly 58–65, never under 55; hooded lids, deep folds, jowls, soft jaw, gray hair. "
         return ""
 
-    def _batch_face_prompt(character, overview):
+    def _batch_face_prompt(character, overview, face_profile=""):
         name = str(character.get("name") or "").strip()
         variant = str(character.get("variant") or "").strip()
         age = str(character.get("age") or "").strip()
@@ -1931,6 +1954,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         expression = ""
         appearance = str(character.get("appearance") or "").strip()
         face_design = str(character.get("face_design") or "").strip()
+        face_profile = str(face_profile or character.get("face_profile") or "").strip()
         skin_detail = str(character.get("skin_detail") or "").strip()
         hair = str(character.get("hair") or "").strip()
         clothes = str(character.get("clothes") or "").strip()
@@ -1945,6 +1969,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 f"VISIBLE EXPRESSION — REQUIRED: {expression}" if expression else "",
                 f"appearance: {appearance}" if appearance else "",
                 f"face design: {face_design}" if face_design else "",
+                f"MANDATORY UNIQUE FACE GEOMETRY: {face_profile}" if face_profile else "",
                 f"skin detail: {skin_detail}" if skin_detail else "",
                 f"hair identity: {hair}" if hair else "",
                 f"clothes: {clothes}" if clothes else "",
@@ -1954,7 +1979,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         rules = (
             age_for_3d
             +
-            "สร้างเพียงคนเป้าหมายหนึ่งคน ใบหน้าต้องต่างจากตัวละครอื่นชัดเจนทั้งรูปหน้า ตา คิ้ว จมูก ปาก "
+            "สร้างเพียงคนเป้าหมายหนึ่งคน. MANDATORY UNIQUE FACE GEOMETRY เป็นข้อกำหนดหลักสุดของใบหน้านี้ "
+            "ห้ามเปลี่ยนกลับเป็นหน้าแม่แบบกลางและห้ามใช้โครงหน้าเดียวกับตัวละครอื่น. "
             "กราม โหนกแก้ม สีผิวและตำหนิ ห้ามใช้หน้าแม่แบบซ้ำ. สภาพชีวิต สุขภาพ ความโทรม น้ำหนัก ริ้วรอยและอารมณ์ "
             "ที่ระบุใน TARGET DETAILS ต้องเห็นชัดและมีสิทธิ์เปลี่ยนจากรูปหลัก โดยยังดูเป็นคนเดิม. close-up head-and-shoulders, "
             "full front-facing, centered, looking straight at camera. Use an ordinary calm neutral expression "
@@ -1974,11 +2000,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             f"สร้างรูปภาพใบหน้าตัวละครไทยหนึ่งคนเท่านั้น TARGET CHARACTER: {identity}. "
             f"IDENTITY GROUP: {identity_group}. IDENTITY ROLE: {identity_role}. "
             f"TARGET DETAILS: {details}. "
-            f"CAST CHARACTER BIBLE ใช้เปรียบเทียบเอกลักษณ์เท่านั้น ห้ามวาดคนอื่น: {overview}. "
+            "The previous generated faces in this same chat are unrelated people. Do not continue, imitate, or average their facial appearance. "
         )
-        max_chars = 2000
-        head_room = max(120, max_chars - len(rules) - 2)
-        return head[:head_room].rstrip(" ,;.") + ". " + rules
+        return head.rstrip(" ,;.") + ". " + rules
     
     def _extract_auto_face_characters(text):
         """Extract full character objects from prompt_ref_context JSON."""
@@ -2063,7 +2087,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     display_name = name + (f" — {variant}" if variant else "")
                     _new_log(f"[auto-face] {idx}/{len(characters)} — เริ่มสร้าง: {display_name}")
                     if source_kind == "ข้อมูลชุด":
-                        prompt = _batch_face_prompt(character, overview)
+                        prompt = _batch_face_prompt(character, overview, face_profiles.get(_identity_family_key(character), ""))
                     else:
                         # Build prompt from full Prompt Context details, same as Select.
                         builder = globals().get("_build_story_face_prompt_from_character")
@@ -2072,6 +2096,13 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                         else:
                             tmpl = g.get("story_face_prompt_template", "")
                             prompt = tmpl.replace("{name}", name)
+                        profile = face_profiles.get(_identity_family_key(character), "")
+                        if profile:
+                            prompt = (
+                                "MANDATORY UNIQUE FACE GEOMETRY — preserve exactly: " + profile + ". "
+                                "This is a new unrelated identity; do not continue or imitate any earlier face in this chat.\n\n"
+                                + prompt
+                            )
                     age_label = str(new_age_var.get() or "อัตโนมัติ").strip()
                     age_val = _FACE_AGE_MAP.get(age_label, "35")
                     prompt = prompt.replace("{age}", age_val).replace("{name}", name)
@@ -2080,18 +2111,12 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     prompt, identity_images = _identity_reference_payload(prompt, identity_source) if identity_source else (prompt, None)
                     condition = _condition_text(character)
                     prompt = _append_condition_override(prompt, condition)
-                    payload = _build_story_face_payload(prompt)
                     if "_wait_bridge_free" in globals():
                         globals()["_wait_bridge_free"](log_fn=_new_log)
-                    refine = g.get("_refine_prompt_via_ai") or globals().get("_refine_prompt_via_ai")
-                    if callable(refine):
-                        _new_log(f"[refine] ส่ง GPT แปลง prompt Face: {name}")
-                    # This prompt already contains only the selected character
-                    # object; do not append the entire story context.
-                    final_prompt = refine(prompt, kind="face", use_context=False) if callable(refine) else prompt
-                    if final_prompt != prompt:
-                        _new_log(f"[refine] {name}: prompt ใหม่ ({len(final_prompt)} chars)")
-                    final_prompt = _append_condition_override(final_prompt, condition)
+                    # Keep the structured face geometry intact. The generic
+                    # rewriter used to compress it and make every cast member
+                    # look like the same default portrait.
+                    final_prompt = prompt
                     age_reserve = _three_d_age_reserve(character)
                     if age_reserve:
                         final_prompt = str(final_prompt).rstrip() + "\n\nFINAL " + age_reserve
@@ -2133,6 +2158,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                             0 if item.get("identity_master") else 1,
                         ),
                     )
+                    face_profiles = _assign_cast_face_profiles(characters)
                     names = [
                         str(c.get("name", "")).strip()
                         + (f" ({str(c.get('variant', '')).strip()})" if str(c.get("variant", "")).strip() else "")
