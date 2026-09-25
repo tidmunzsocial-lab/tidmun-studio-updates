@@ -35,9 +35,19 @@ try {
     if (-not (Test-Path -LiteralPath $python)) {
         $python = (Get-Command python -ErrorAction Stop).Source
     }
+    & $python -c "import PyInstaller" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "กำลังติดตั้ง PyInstaller สำหรับแพ็กเกจ Windows EXE..."
+        & $python -m pip install --disable-pip-version-check --no-input pyinstaller
+        if ($LASTEXITCODE -ne 0) { throw "ติดตั้ง PyInstaller ไม่สำเร็จ" }
+    }
     & $python -B (Join-Path $Tools "build_update_patch.py")
     if ($LASTEXITCODE -ne 0) { throw "สร้าง Patch ไม่สำเร็จ" }
     $asset = Join-Path $Tools "release\tidmun-studio-patch.zip"
+    & $python -B (Join-Path $Tools "build_snapgen_exe.py")
+    if ($LASTEXITCODE -ne 0) { throw "สร้าง Windows EXE ไม่สำเร็จ" }
+    $exeAsset = Join-Path $Tools "release\Tidmunz-Studio-v$Version-windows.zip"
+    if (-not (Test-Path -LiteralPath $exeAsset)) { throw "ไม่พบแพ็กเกจ Windows EXE" }
 
     # An empty GitHub repository needs one initial commit before its first tag.
     $repoInfo = & gh api "repos/$Repo" | ConvertFrom-Json
@@ -59,7 +69,7 @@ try {
     if ($existingTags -contains "v$Version") {
         throw "มี Release v$Version อยู่แล้ว กรุณาใช้เลขเวอร์ชันใหม่"
     }
-    & gh release create "v$Version" $asset --repo $Repo --title "ติดมันส์ สตูดิโอ v$Version" --notes $Notes --latest
+    & gh release create "v$Version" $asset $exeAsset --repo $Repo --title "ติดมันส์ สตูดิโอ v$Version" --notes $Notes --latest
     if ($LASTEXITCODE -ne 0) { throw "เผยแพร่ GitHub Release ไม่สำเร็จ" }
     $published = $true
 }
