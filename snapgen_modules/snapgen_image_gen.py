@@ -175,6 +175,7 @@ def get_image_story_cursor():
         "conversation_id": str(_story_conversation["conversation_id"]),
         "parent_message_id": str(_story_conversation["parent_message_id"]),
         "account_alias": str(_story_conversation.get("account_alias") or ""),
+        "story_hash": str(_story_conversation.get("story_hash") or ""),
     }
 
 def get_story_title():

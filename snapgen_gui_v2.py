@@ -7914,13 +7914,14 @@ def _save_prompt_ref_source_file(original_path):
 def _load_prompt_ref_conversation():
     try:
         value = json.loads(PROMPT_REF_CONVERSATION_PATH.read_text(encoding="utf-8"))
-        if value.get("conversation_id") and value.get("parent_message_id"):
+        if ((value.get("conversation_id") and value.get("parent_message_id"))
+                or value.get("new_story_requested")):
             return {
-                "conversation_id": str(value["conversation_id"]),
-                "parent_message_id": str(value["parent_message_id"]),
+                "conversation_id": str(value.get("conversation_id") or ""),
+                "parent_message_id": str(value.get("parent_message_id") or ""),
                 "conversation_url": str(
                     value.get("conversation_url")
-                    or f"https://chatgpt.com/c/{value['conversation_id']}"
+                    or (f"https://chatgpt.com/c/{value['conversation_id']}" if value.get("conversation_id") else "")
                 ),
                 "account_alias": str(value.get("account_alias") or ""),
                 "chrome_profile": str(
@@ -7928,6 +7929,7 @@ def _load_prompt_ref_conversation():
                     or (Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "TidMunStudio" / "SnapGenChromeProfile" / "Default")
                 ),
                 "story_hash": str(value.get("story_hash") or ""),
+                "new_story_requested": bool(value.get("new_story_requested")),
                 "context_ready": bool(value.get("context_ready")),
                 "context_conversation_id": str(value.get("context_conversation_id") or ""),
                 "context_parent_message_id": str(value.get("context_parent_message_id") or ""),
@@ -7946,6 +7948,7 @@ def _load_prompt_ref_conversation():
             / "TidMunStudio" / "SnapGenChromeProfile" / "Default"
         ),
         "story_hash": "",
+        "new_story_requested": False,
         "context_ready": False,
         "context_conversation_id": "",
         "context_parent_message_id": "",
@@ -7977,6 +7980,7 @@ def _reset_prompt_ref_conversation():
             / "TidMunStudio" / "SnapGenChromeProfile" / "Default"
         ),
         "story_hash": "",
+        "new_story_requested": False,
         "context_ready": False,
         "context_conversation_id": "",
         "context_parent_message_id": "",
@@ -8142,22 +8146,9 @@ def _rebuild_prompt_ref_bridge_once():
         _bridge_startup_sync()
         for _ in range(45):
             if _bridge_health():
-                # Health alone is insufficient: prove normal-chat itself.
-                errors = []
-                for model in ("auto",):
-                    try:
-                        probe = _prompt_ref_chat(
-                            [{"role": "user", "content": "ตอบ BRIDGE_OK เท่านั้น"}],
-                            _repair_retry=False,
-                            model=model,
-                        )
-                        if "BRIDGE_OK" in str(probe).upper():
-                            _reset_prompt_ref_conversation()
-                            return True
-                    except Exception as exc:
-                        errors.append(f"{model}: {exc}")
-                if errors:
-                    print("[Bridge rebuild] normal-chat ยังไม่ผ่าน: " + " | ".join(errors))
+                # Retry the original request in its saved conversation. A
+                # separate chat probe here used to replace the user's cursor.
+                return True
             time.sleep(1)
     except Exception as exc:
         print(f"[SnapGen] ERROR: สร้าง Bridge runtime ใหม่ไม่สำเร็จ: {exc}")
@@ -8247,11 +8238,7 @@ def _prompt_ref_chat(messages, *, require_history=False, _repair_retry=True, mod
         if _repair_retry and _repair_prompt_ref_bridge_once():
             return _prompt_ref_chat(messages, require_history=require_history, _repair_retry=False, model=model)
         raise RuntimeError("ซ่อม Bridge อัตโนมัติแล้ว แต่ยังไม่ได้รหัสประวัติ Prompt-Ref")
-    if (
-        require_history
-        and requested_conversation_id
-        and str(conversation_id) != requested_conversation_id
-    ):
+    if requested_conversation_id and str(conversation_id) != requested_conversation_id:
         raise RuntimeError(
             "GPT/Bridge หลุดจากประวัติ Prompt-Ref เดิม "
             f"(เดิม {requested_conversation_id}, ใหม่ {conversation_id}) — ยกเลิกเพื่อไม่ให้ Context กับ Storyboard แยกแชท"
@@ -8282,7 +8269,6 @@ def _ingest_prompt_ref_story(full_story, source_file="auto"):
         raise RuntimeError("ยังไม่มีบททั้งเรื่อง")
     upload_path = _prompt_ref_source_upload_path() if source_file == "auto" else (Path(source_file) if source_file else None)
     source_kind = "DOCX" if upload_path and upload_path.is_file() and upload_path.suffix.lower() == ".docx" else "TEXT"
-    _reset_prompt_ref_conversation()
     # DOCX remains the user's selected source file, but Bridge file upload is
     # intentionally not used here: team PCs can generate images yet crash the
     # normal-chat connection on DOCX upload. SnapGen extracts DOCX locally and
@@ -8326,7 +8312,6 @@ def _ingest_and_build_prompt_ref_context(full_story, source_file="auto"):
         raise RuntimeError("ยังไม่มีบททั้งเรื่อง")
     upload_path = _prompt_ref_source_upload_path() if source_file == "auto" else (Path(source_file) if source_file else None)
     source_kind = "DOCX" if upload_path and upload_path.is_file() and upload_path.suffix.lower() == ".docx" else "TEXT"
-    _reset_prompt_ref_conversation()
     # Team PCs proved that one large story+schema request can make their local
     # Bridge close the connection. Small ordered turns keep each request light
     # while preserving the full story in one ChatGPT conversation.
@@ -8388,7 +8373,6 @@ def _attach_docx_and_build_prompt_ref_context(source_file, story_for_hash=""):
     except OSError as exc:
         raise RuntimeError(f"อ่านไฟล์ DOCX เพื่อแนบไม่ได้: {exc}") from exc
 
-    _reset_prompt_ref_conversation()
     reply = _prompt_ref_chat([{
         "role": "user",
         "content": [
@@ -10809,7 +10793,7 @@ def _open_prompt_bank_ai():
 
     tk.Label(
         win,
-        text="หนึ่งเรื่อง = หนึ่งแชท GPT | ครั้งแรกวางบททั้งเรื่องแล้วกด เริ่มเรื่องจากบทนี้ | หลังจากนั้นวางบทสั้นแล้วกด สร้าง Storyboard + Prompt",
+        text="หนึ่งเรื่อง = หนึ่งแชท GPT | เปลี่ยนเรื่องเมื่อกด เริ่มเรื่องใหม่ ด้านบนเท่านั้น | งานในเรื่องเดิมวางฉากแล้วกด สร้าง Storyboard + Prompt",
         bg=ui_bg,
         fg=muted_fg,
         font=("TkDefaultFont", 10),
@@ -10823,7 +10807,7 @@ def _open_prompt_bank_ai():
     pane.pack(fill="both", expand=True, padx=16, pady=(0, 10))
     sf = tk.LabelFrame(
         pane,
-        text="ครั้งแรกวางบททั้งเรื่อง · หลังจากส่งแล้วใช้ช่องนี้วางฉากปัจจุบัน",
+        text="บท/ฉากของเรื่องปัจจุบัน · หลังเริ่มเรื่องใหม่ให้ส่งบททั้งเรื่องหนึ่งครั้ง",
         bg=panel_bg,
         fg="#334155",
         bd=0,
@@ -11251,9 +11235,6 @@ def _open_prompt_bank_ai():
             uploaded_story_context[0] = text
             source_path.write_text(text, encoding="utf-8")
             cached_source = _save_prompt_ref_source_file(pth)
-            invalidate = g.get("invalidate_downstream_story_histories")
-            if callable(invalidate):
-                invalidate()
             source_file_var.set(os.path.abspath(pth))
             set_context_state("idle", "พร้อมอัปเดต Context", f"โหลดบทหลักแล้ว: {os.path.basename(pth)}")
         def clear_source():
@@ -11477,9 +11458,6 @@ def _open_prompt_bank_ai():
         uploaded_story_context[0] = text
         source_path.write_text(text, encoding="utf-8")
         _save_prompt_ref_source_file(p)
-        invalidate = g.get("invalidate_downstream_story_histories")
-        if callable(invalidate):
-            invalidate()
         status.set(f"โหลดไฟล์ต้นฉบับแล้ว: {os.path.basename(p)} → เก็บที่ {source_path.name}")
         open_source_summary_window(os.path.basename(p))
     def paste_story():
@@ -11499,9 +11477,6 @@ def _open_prompt_bank_ai():
     def clear_story():
         story_box.delete("1.0", tk.END)
         _save_scene_draft_now()
-        invalidate = g.get("invalidate_downstream_story_histories")
-        if callable(invalidate):
-            invalidate()
     def clear_prompt_ref():
         bank_box.delete("1.0", tk.END)
         status.set("ล้าง Slot แล้ว")
@@ -11523,18 +11498,17 @@ def _open_prompt_bank_ai():
             parts.append(raw)
             return "\n".join(parts)
         return raw
+    new_story_requested = [bool(_prompt_ref_conversation.get("new_story_requested"))]
+
     def send_full_story():
-        if _prompt_ref_cursor_ready():
-            g["show_error"]("ประวัติเรื่องเดิมยังอยู่", "กด เริ่มเรื่องใหม่ ก่อน หากต้องการส่งบททั้งเรื่องเป็นเรื่องใหม่")
+        if not new_story_requested[0]:
+            g["show_error"]("ประวัติเรื่อง", "หากต้องการเปลี่ยนเรื่อง ให้กด เริ่มเรื่องใหม่ ด้านบนเอง")
             return
         full_story = story_box.get("1.0", tk.END).strip()
         if not full_story:
             g["show_error"]("บททั้งเรื่อง", "วางบททั้งเรื่องลงในช่องก่อน")
             return
         source_path.write_text(full_story + "\n", encoding="utf-8")
-        invalidate = g.get("invalidate_downstream_story_histories")
-        if callable(invalidate):
-            invalidate()
         gen_btn.config(state="disabled")
         set_status_light("#3B82F6", "กำลังส่งบททั้งเรื่องเข้า GPT...")
         def worker():
@@ -11547,6 +11521,9 @@ def _open_prompt_bank_ai():
                     encoded_context = json.dumps(master, ensure_ascii=False, indent=2)
                     json_context_path.write_text(encoded_context + "\n", encoding="utf-8")
                 def done():
+                    new_story_requested[0] = False
+                    _prompt_ref_conversation["new_story_requested"] = False
+                    _save_prompt_ref_conversation()
                     prompt_ref_context[0] = encoded_context
                     story_box.delete("1.0", tk.END)
                     _save_scene_draft_now()
@@ -11578,13 +11555,16 @@ def _open_prompt_bank_ai():
         if not messagebox.askyesno("เริ่มเรื่องใหม่", "ล้างประวัติ Prompt-Ref ของเรื่องปัจจุบัน แล้วเริ่มเรื่องใหม่หรือไม่?", parent=win):
             return
         _reset_prompt_ref_conversation()
+        new_story_requested[0] = True
+        _prompt_ref_conversation["new_story_requested"] = True
+        _save_prompt_ref_conversation()
         invalidate = g.get("invalidate_downstream_story_histories")
         if callable(invalidate):
             invalidate()
         story_box.delete("1.0", tk.END)
         _save_scene_draft_now()
-        gen_btn.config(text="เริ่มเรื่องจากบทนี้")
-        set_status_light("#94A3B8", "เริ่มเรื่องใหม่แล้ว — วางบททั้งเรื่องแล้วกด เริ่มเรื่องจากบทนี้")
+        gen_btn.config(text="ส่งบททั้งเรื่อง")
+        set_status_light("#94A3B8", "เริ่มเรื่องใหม่แล้ว — วางบททั้งเรื่องแล้วกด ส่งบททั้งเรื่อง")
 
     _slot_button(story_tools, "วางฉาก", paste_story, "neutral").pack(side="left")
     _slot_button(story_tools, "ล้างบท", clear_story, "danger").pack(side="left", padx=(8,0))
@@ -11800,9 +11780,41 @@ def _open_prompt_bank_ai():
                 root.after(0, fail)
         threading.Thread(target=worker, daemon=True).start()
 
+    def reuse_image_story_history():
+        """Recover a same-story chat from Image AI without starting a new one."""
+        if _prompt_ref_cursor_ready():
+            return True
+        try:
+            import snapgen_image_gen as image_gen
+            cursor = image_gen.get_image_story_cursor()
+            source = source_path.read_text(encoding="utf-8", errors="replace")
+            story_hash = _prompt_ref_story_hash(source)
+            if not cursor or not story_hash or cursor.get("story_hash") != story_hash:
+                return False
+            _prompt_ref_conversation.update({
+                "conversation_id": cursor["conversation_id"],
+                "parent_message_id": cursor["parent_message_id"],
+                "account_alias": cursor.get("account_alias") or "",
+                "story_hash": story_hash,
+                "context_ready": False,
+                "context_conversation_id": "",
+                "context_parent_message_id": "",
+                "context_story_hash": "",
+            })
+            _save_prompt_ref_conversation()
+            return True
+        except (OSError, ValueError, ImportError):
+            return False
+
+    reuse_image_story_history()
+
     def run_prompt_ref_action():
         if _prompt_ref_context_history_ready():
             ai_make(False)
+        elif new_story_requested[0] and not _prompt_ref_conversation.get("story_hash"):
+            # A failed first upload may already have a cursor. Retry that
+            # same chat instead of discarding it or creating a second one.
+            send_full_story()
         elif _prompt_ref_cursor_ready():
             if not _prompt_ref_history_ready():
                 g["show_error"]("บทหลักไม่ตรงกับประวัติเดิม", "ตรวจไฟล์บทหลักของเรื่องนี้ก่อน — โปรแกรมจะไม่เริ่มแชตใหม่หรือส่งบทซ้ำให้อัตโนมัติ")
@@ -11832,8 +11844,10 @@ def _open_prompt_bank_ai():
                     root.after(0, fail)
 
             threading.Thread(target=worker, daemon=True).start()
-        else:
+        elif new_story_requested[0]:
             send_full_story()
+        else:
+            g["show_error"]("ประวัติเรื่อง", "ยังไม่พบประวัติ Prompt-Ref ที่ส่งบทแล้ว หากต้องการเริ่มเรื่องใหม่ให้กด เริ่มเรื่องใหม่ ด้านบน")
 
 
     row = tk.Frame(win, bg=ui_bg); row.pack(fill="x", padx=16, pady=(0, 14))
@@ -11841,8 +11855,9 @@ def _open_prompt_bank_ai():
     gen_btn = _slot_button(
         row,
         ("สร้าง Storyboard + Prompt" if _prompt_ref_context_history_ready()
+         else "ส่งบททั้งเรื่อง" if new_story_requested[0] and not _prompt_ref_conversation.get("story_hash")
          else "สร้าง Context ในประวัติเดิม" if _prompt_ref_cursor_ready()
-         else "เริ่มเรื่องจากบทนี้"),
+         else "สร้าง Storyboard + Prompt"),
         run_prompt_ref_action,
         "primary",
         width=18,
