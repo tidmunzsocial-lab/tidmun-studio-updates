@@ -481,33 +481,14 @@ def ensure_latest_storyboard_context(*, log_fn=None):
 
     log = log_fn or _log
     storyboard_story_hash = str(meta.get("context_hash") or meta.get("story_hash") or "").strip()
-    started_new_history = False
-    if not has_story_conversation():
-        story_path = _STORY_STATE_PATH.parent.parent / "prompt_ref_source.txt"
-        try:
-            story_bytes = story_path.read_bytes()
-        except OSError as exc:
-            raise RuntimeError("ไม่พบบท Prompt-Ref สำหรับเริ่มประวัติ Image AI อัตโนมัติ") from exc
-        if not story_bytes.strip():
-            raise RuntimeError("บท Prompt-Ref ว่าง จึงส่ง Storyboard เข้า Image AI ไม่ได้")
-        log("[Storyboard Context] ยังไม่มีประวัติ Image AI — เริ่มจากบท Prompt-Ref อัตโนมัติ...")
-        reset_story_conversation()
-        ingest_story_file(
-            _title_from_story_content(story_bytes),
-            story_path.name,
-            story_bytes,
-            log_fn=log,
-        )
-        started_new_history = True
+    # A source edit does not end the user's story. Never reset or re-upload the
+    # script here; only the explicit New Story action may start another history.
+    if not get_image_story_cursor():
+        return {"sent": False, "reason": "no_story_history"}
 
     current_story_hash = str(_story_conversation.get("story_hash") or "").strip()
     if storyboard_story_hash and current_story_hash and storyboard_story_hash != current_story_hash:
         return {"sent": False, "reason": "storyboard_from_other_story"}
-    if started_new_history and not storyboard_story_hash:
-        # A legacy metadata file without a story hash cannot be proven to
-        # belong to the new story. Wait for the current Storyboard generation
-        # to mark itself in this history instead of importing an old board.
-        return {"sent": False, "reason": "unverified_storyboard_story"}
 
     # Include the instruction version so a changed storyboard-use rule is sent
     # once again even when the image file itself has not changed.
@@ -1232,8 +1213,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
     """
     log = log_fn or _log
 
-    # Image AI automatically registers the newest Prompt-Ref storyboard once
-    # before creating the first scene from it. The same file is not resent.
+    # Register a changed storyboard only in the existing Image AI history.
     if use_story_history:
         ensure_latest_storyboard_context(log_fn=log)
 

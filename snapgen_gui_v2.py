@@ -893,6 +893,26 @@ try:
         use_story_history = bool(payload.get("_use_story_history", False))
         use_ref_story_history = bool(payload.get("_use_ref_story_history", False))
         use_story_face_history = bool(payload.get("_use_story_face_history", False))
+        conversation_state = None
+        conversation_save_fn = None
+        if use_story_history:
+            # Prompt-Ref, Storyboard, Image Slots, edits and video are one
+            # production. Keep one cursor owner so pages cannot split the same
+            # story into separate ChatGPT histories.
+            conversation_state = globals().get("_prompt_ref_conversation")
+            conversation_save_fn = globals().get("_save_prompt_ref_conversation")
+            legacy_cursor = _imgmod.get_image_story_cursor()
+            if isinstance(conversation_state, dict) and not (
+                conversation_state.get("conversation_id")
+                and conversation_state.get("parent_message_id")
+            ) and legacy_cursor:
+                conversation_state.update({
+                    "conversation_id": legacy_cursor["conversation_id"],
+                    "parent_message_id": legacy_cursor["parent_message_id"],
+                    "account_alias": legacy_cursor.get("account_alias", ""),
+                })
+                if callable(conversation_save_fn):
+                    conversation_save_fn()
         target_dir = output_dir or str(EXPORT_IMAGE)
         try:
             target_path = Path(target_dir).resolve()
@@ -910,9 +930,11 @@ try:
                 ref_images=ref_imgs,
                 aspect_ratio=ar,
                 save_sidecar=save_sidecar,
-                use_story_history=use_story_history,
+                use_story_history=False,
                 use_ref_story_history=use_ref_story_history,
                 use_story_face_history=use_story_face_history,
+                conversation_state=conversation_state,
+                conversation_save_fn=conversation_save_fn,
             )
         except Exception as e:
             raise RuntimeError(_snapgen_friendly_bridge_error(e)) from e
@@ -8726,10 +8748,8 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         aspect_ratio="9:16",
         save_sidecar=False,
         log_fn=log_fn,
-        # Every generated image, including Storyboard, belongs to Image AI's
-        # one persisted story history. Prompt-Ref remains the text/planning
-        # history, but it must never own an image-generation cursor.
-        use_story_history=True,
+        conversation_state=_prompt_ref_conversation,
+        conversation_save_fn=_save_prompt_ref_conversation,
     )
     output_path = Path(str(output))
     if not output_path.is_file() or output_path.stat().st_size <= 0:
@@ -8765,7 +8785,7 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         "reference_images_disabled": False,
         "context_hash": str(_prompt_ref_conversation.get("story_hash") or ""),
         "history_chain": {
-            "owner": "image_ai",
+            "owner": "prompt_ref",
             "same_conversation": True,
         },
     }
@@ -8773,9 +8793,6 @@ def _generate_prompt_ref_storyboard_image_from_scene(story_text):
         json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    # The image request above already advanced Image AI's cursor. Mark this
-    # exact file as present in that history instead of uploading it again.
-    _imgmod.mark_storyboard_context_registered(output_path)
     return str(output_path)
 def _build_prompt_ref_storyboard_analysis_request(story_text):
     story = str(story_text or "").strip()
