@@ -234,12 +234,15 @@ def update_ref_story_conversation(result):
         _save_ref_story_conversation()
 
 
-def send_ref_story_type_lock(story_type, *, log_fn=None):
-    """Send the selected story type rules once into the current Ref history."""
-    if not has_ref_story_conversation():
-        raise RuntimeError("ยังไม่มีประวัติ Ref สำหรับส่งประเภทเรื่อง")
+def send_ref_story_type_lock(
+    story_type, *, log_fn=None, conversation_state=None, conversation_save_fn=None,
+):
+    """Send story-type rules once into the caller-owned story conversation."""
+    state = conversation_state if isinstance(conversation_state, dict) else _ref_story_conversation
+    if not (state.get("conversation_id") and state.get("parent_message_id")):
+        raise RuntimeError("ยังไม่มีประวัติเรื่องหลักสำหรับส่งประเภทเรื่อง")
     story_type_id = normalize_story_type(story_type)
-    if _ref_story_conversation.get("story_type_lock") == story_type_id:
+    if state.get("story_type_lock") == story_type_id:
         return False
     _, profile = story_type_profile(story_type_id)
     label = str(profile.get("label") or "อัตโนมัติตามบท")
@@ -271,9 +274,14 @@ def send_ref_story_type_lock(story_type, *, log_fn=None):
         "messages": [{"role": "user", "content": instruction}],
         "history_and_training_disabled": False,
     }
-    payload.update(get_ref_story_request_context())
+    payload["metadata"] = {
+        "conversation_id": state["conversation_id"],
+        "parent_message_id": state["parent_message_id"],
+    }
+    if state.get("account_alias"):
+        payload["chatgpt_account"] = state["account_alias"]
     try:
-        log(f"[ประเภทเรื่อง] ส่งกฎ {label} เข้า GPT ในประวัติ Ref เดิม...")
+        log(f"[ประเภทเรื่อง] ส่งกฎ {label} เข้า GPT ในประวัติเรื่องหลักเดิม...")
         with _queue_lock:
             request = urllib.request.Request(
                 f"{BRIDGE_URL}/v1/chat/completions",
@@ -293,20 +301,25 @@ def send_ref_story_type_lock(story_type, *, log_fn=None):
         raise RuntimeError(f"ส่งกฎประเภทเรื่องไม่สำเร็จ: {exc}") from exc
     if isinstance(result.get("error"), dict):
         raise RuntimeError(str(result["error"].get("message") or result["error"]))
-    previous_conversation_id = str(_ref_story_conversation.get("conversation_id") or "").strip()
+    previous_conversation_id = str(state.get("conversation_id") or "").strip()
     returned_conversation_id = str(result.get("conversation_id") or "").strip()
     returned_parent_message_id = str(result.get("parent_message_id") or "").strip()
     if not returned_conversation_id or not returned_parent_message_id:
         raise RuntimeError("Bridge รับกฎประเภทเรื่องแล้วแต่ไม่ส่ง cursor กลับมา")
     if previous_conversation_id and returned_conversation_id != previous_conversation_id:
-        raise RuntimeError("Bridge เปิดประวัติใหม่แทนประวัติ Ref เดิมตอนส่งกฎประเภทเรื่อง")
-    previous_account = str(_ref_story_conversation.get("account_alias") or "").strip()
+        raise RuntimeError("Bridge เปิดประวัติใหม่แทนประวัติเรื่องหลักตอนส่งกฎประเภทเรื่อง")
+    previous_account = str(state.get("account_alias") or "").strip()
     returned_account = str(result.get("chatgpt_account") or "").strip()
     if previous_account and returned_account and returned_account != previous_account:
-        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติ Ref เดิมตอนส่งกฎประเภทเรื่อง")
-    update_ref_story_conversation(result)
-    _ref_story_conversation["story_type_lock"] = story_type_id
-    _save_ref_story_conversation()
+        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติเรื่องหลักตอนส่งกฎประเภทเรื่อง")
+    state["conversation_id"] = returned_conversation_id
+    state["parent_message_id"] = returned_parent_message_id
+    state["account_alias"] = str(result.get("chatgpt_account") or state.get("account_alias") or "")
+    state["story_type_lock"] = story_type_id
+    if callable(conversation_save_fn):
+        conversation_save_fn()
+    elif state is _ref_story_conversation:
+        _save_ref_story_conversation()
     log(f"[ประเภทเรื่อง] GPT รับกฎ {label} แล้ว — พร้อมสร้าง Ref")
     return True
 
@@ -379,7 +392,10 @@ _load_story_face_conversation()
 _load_prop_conversation()
 
 
-def ingest_story_context(ref_images, *, log_fn=None, storyboard_panel_mode=False):
+def ingest_story_context(
+    ref_images, *, log_fn=None, storyboard_panel_mode=False,
+    conversation_state=None, conversation_save_fn=None,
+):
     """Upload prior-event images into the current story chat without generating.
 
     The returned conversation/message ids become the parent of the next image
@@ -389,6 +405,11 @@ def ingest_story_context(ref_images, *, log_fn=None, storyboard_panel_mode=False
     if not images:
         raise RuntimeError("ไม่มีรูปบริบทเหตุการณ์ให้ส่ง")
     log = log_fn or _log
+    state = conversation_state if isinstance(conversation_state, dict) else _story_conversation
+    requested_conversation_id = str(state.get("conversation_id") or "").strip()
+    requested_parent_message_id = str(state.get("parent_message_id") or "").strip()
+    if not requested_conversation_id or not requested_parent_message_id:
+        raise RuntimeError("ยังไม่ได้เริ่มเรื่องจาก Prompt-Ref")
     if storyboard_panel_mode:
         prompt = (
             "These attached images are STORYBOARD REFERENCES. For the next image-generation "
@@ -410,12 +431,13 @@ def ingest_story_context(ref_images, *, log_fn=None, storyboard_panel_mode=False
         "prompt": prompt,
         "images": images,
     }
-    if _story_conversation["conversation_id"] and _story_conversation.get("account_alias"):
+    if requested_conversation_id:
         payload["metadata"] = {
-            "conversation_id": _story_conversation["conversation_id"],
-            "parent_message_id": _story_conversation["parent_message_id"],
+            "conversation_id": requested_conversation_id,
+            "parent_message_id": requested_parent_message_id,
         }
-        payload["chatgpt_account"] = _story_conversation["account_alias"]
+        if state.get("account_alias"):
+            payload["chatgpt_account"] = state["account_alias"]
     req = urllib.request.Request(
         f"{BRIDGE_URL}/v1/chatgpt/vision",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -441,10 +463,15 @@ def ingest_story_context(ref_images, *, log_fn=None, storyboard_panel_mode=False
     parent_message_id = result.get("parent_message_id")
     if not conversation_id or not parent_message_id:
         raise RuntimeError("Bridge รับรูปแล้วแต่ไม่ส่งรหัสประวัติกลับมา กรุณารีสตาร์ต Bridge")
-    _story_conversation["conversation_id"] = conversation_id
-    _story_conversation["parent_message_id"] = parent_message_id
-    _story_conversation["account_alias"] = str(result.get("chatgpt_account") or "")
-    _save_story_conversation()
+    if str(conversation_id) != requested_conversation_id:
+        raise RuntimeError("Bridge เปิดแชตใหม่แทนประวัติเรื่องเดิม — ยกเลิกผลลัพธ์")
+    state["parent_message_id"] = str(parent_message_id)
+    if result.get("chatgpt_account"):
+        state["account_alias"] = str(result["chatgpt_account"])
+    if callable(conversation_save_fn):
+        conversation_save_fn()
+    elif state is _story_conversation:
+        _save_story_conversation()
     summary = str(result.get("text") or "").strip()
     log("[บริบท] GPT รับรู้เหตุการณ์ก่อนหน้าแล้ว")
     if summary:
@@ -610,6 +637,7 @@ def generate_video_prompt_from_story_image(
     model_name="",
     log_fn=None,
     history_cursor=None,
+    conversation_save_fn=None,
 ):
     """Write a Video Prompt from the Slot image, continuing a story cursor when available."""
     source = Path(str(image_path or "")).expanduser().resolve()
@@ -726,6 +754,8 @@ def generate_video_prompt_from_story_image(
     elif cursor:
         history_cursor["parent_message_id"] = parent_message_id
         history_cursor["account_alias"] = str(result.get("chatgpt_account") or cursor.get("account_alias") or "")
+        if callable(conversation_save_fn):
+            conversation_save_fn()
     log(f"[GPT Video Prompt] พร้อมแล้วสำหรับ {slot_text}")
     return answer
 
@@ -830,7 +860,7 @@ def generate_prompt_ref_storyboard_json_from_image(
 def _ingest_story_file_into(
     state, save_fn, story_title, filename, file_bytes, *, purpose,
     log_fn=None, attach_file=True, instruction_override=None,
-    story_face_lock=False, continue_history=False,
+    story_face_lock=False, continue_history=False, update_story_identity=True,
 ):
     name = str(filename or "story.txt").strip() or "story.txt"
     content = bytes(file_bytes or b"")
@@ -919,11 +949,11 @@ def _ingest_story_file_into(
         raise RuntimeError("Bridge รับบทแล้วแต่ไม่ส่งรหัสประวัติกลับมา")
     previous_conversation_id = str(state.get("conversation_id") or "").strip()
     if continue_history and previous_conversation_id and str(conversation_id) != previous_conversation_id:
-        raise RuntimeError("Bridge เปิดประวัติใหม่แทนประวัติ Story Face เดิม — ยกเลิกเพื่อไม่ให้เรื่องปนกัน")
+        raise RuntimeError("Bridge เปิดประวัติใหม่แทนประวัติเรื่องหลักเดิม — ยกเลิกเพื่อไม่ให้เรื่องแยก")
     previous_account = str(state.get("account_alias") or "").strip()
     returned_account = str(result.get("chatgpt_account") or "").strip()
     if continue_history and previous_account and returned_account and returned_account != previous_account:
-        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติ Story Face เดิม — ยกเลิกเพื่อไม่ให้เรื่องปนกัน")
+        raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติเรื่องหลักเดิม — ยกเลิกเพื่อไม่ให้เรื่องแยก")
     state["conversation_id"] = str(conversation_id)
     state["parent_message_id"] = str(parent_message_id)
     if state is _story_face_conversation:
@@ -931,9 +961,10 @@ def _ingest_story_file_into(
         # image from the latest text/Character-Bible turn instead of chaining
         # one generated face into the next character's visual context.
         state["story_context_parent_message_id"] = str(parent_message_id)
-    state["account_alias"] = str(result.get("chatgpt_account") or "")
-    state["story_title"] = title
-    state["story_hash"] = _story_hash(content)
+    state["account_alias"] = str(result.get("chatgpt_account") or state.get("account_alias") or "")
+    if update_story_identity:
+        state["story_title"] = title
+        state["story_hash"] = _story_hash(content)
     save_fn()
     message = ((result.get("choices") or [{}])[0].get("message") or {}).get("content") or result.get("text") or ""
     summary = str(message).strip()
@@ -945,7 +976,7 @@ def _ingest_story_file_into(
         "parent_message_id": parent_message_id,
         "summary": summary,
         "story_title": title,
-        "story_hash": state["story_hash"],
+        "story_hash": str(state.get("story_hash") or ""),
     }
 
 def ingest_story_file(story_title, filename, file_bytes, *, log_fn=None):
@@ -976,19 +1007,29 @@ def ingest_story_face_file(story_title, filename, file_bytes, *, log_fn=None):
     )
 
 
-def analyze_story_face_dataset(story_title, text, instruction, *, log_fn=None):
-    """Analyze Story Face rows inside the history later used to generate faces."""
+def analyze_story_face_dataset(
+    story_title, text, instruction, *, log_fn=None,
+    conversation_state=None, conversation_save_fn=None,
+):
+    """Analyze Story Face rows inside the caller-owned main story history."""
     source = str(text or "").strip()
     if not source:
         raise RuntimeError("ข้อมูลชุดนิทานว่าง")
     source_hash = _story_hash(source.encode("utf-8"))
-    existing_hash = get_story_face_hash()
-    continue_history = bool(has_story_face_conversation())
-    if continue_history and existing_hash and existing_hash != source_hash:
+    external_state = isinstance(conversation_state, dict)
+    state = conversation_state if external_state else _story_face_conversation
+    save_fn = conversation_save_fn if external_state else _save_story_face_conversation
+    existing_hash = "" if external_state else get_story_face_hash()
+    continue_history = bool(
+        state.get("conversation_id") and state.get("parent_message_id")
+    )
+    if not continue_history:
+        raise RuntimeError("ยังไม่มีประวัติเรื่องหลักจาก Prompt-Ref")
+    if not external_state and existing_hash and existing_hash != source_hash:
         raise RuntimeError("ข้อมูลชุดนิทานไม่ตรงกับประวัติ Story Face เดิม — กด เปลี่ยนเรื่อง ก่อนวิเคราะห์ใหม่")
     return _ingest_story_file_into(
-        _story_face_conversation,
-        _save_story_face_conversation,
+        state,
+        save_fn,
         story_title,
         "story-face-dataset.txt",
         source.encode("utf-8"),
@@ -998,6 +1039,7 @@ def analyze_story_face_dataset(story_title, text, instruction, *, log_fn=None):
         instruction_override=instruction,
         story_face_lock=True,
         continue_history=continue_history,
+        update_story_identity=not external_state,
     )
 
 def set_config(*, bridge_url=None, bridge_key=None, model=None,
@@ -1194,7 +1236,7 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                    save_sidecar=True, log_fn=None, use_story_history=False,
                    use_ref_story_history=False, use_story_face_history=False,
                    use_prop_history=False, conversation_state=None,
-                   conversation_save_fn=None):
+                   conversation_save_fn=None, temporary_chat=False):
     """Generate one image via chatgpt-api bridge.
 
     Returns local path to downloaded image, or raises RuntimeError.
@@ -1254,6 +1296,8 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
         }.get(aspect_ratio, "1024x1024"),
         "response_format": "b64_json",
     }
+    if temporary_chat:
+        payload["metadata"] = {"history_and_training_disabled": True}
     if is_edit and ref_images:
         payload["images"] = ref_images
     if aspect_ratio and aspect_ratio != "1:1":
@@ -1331,7 +1375,11 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                     current_history = _prop_conversation
                 elif isinstance(conversation_state, dict):
                     current_history = conversation_state
+                expected_conversation_id = ""
+                expected_account_alias = ""
                 if current_history and current_history.get("conversation_id") and current_history.get("parent_message_id"):
+                    expected_conversation_id = str(current_history["conversation_id"])
+                    expected_account_alias = str(current_history.get("account_alias") or "")
                     payload["metadata"] = {
                         "conversation_id": current_history["conversation_id"],
                         "parent_message_id": (
@@ -1368,6 +1416,19 @@ def generate_image(prompt, *, output_dir=None, name_hint=None,
                 err = result["error"]
                 msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
                 raise RuntimeError(f"Bridge error: {msg}")
+
+            if expected_conversation_id:
+                returned_conversation_id = str(result.get("conversation_id") or "").strip()
+                returned_parent_message_id = str(result.get("parent_message_id") or "").strip()
+                if not returned_conversation_id or not returned_parent_message_id:
+                    raise RuntimeError("Bridge สร้างรูปแล้วแต่ไม่คืน cursor ของประวัติเรื่องเดิม")
+                if returned_conversation_id != expected_conversation_id:
+                    raise RuntimeError(
+                        "Bridge เปิดแชตใหม่แทนประวัติเรื่องเดิม — ยกเลิกการเปลี่ยน cursor"
+                    )
+                returned_account_alias = str(result.get("chatgpt_account") or "").strip()
+                if expected_account_alias and returned_account_alias and returned_account_alias != expected_account_alias:
+                    raise RuntimeError("Bridge ใช้บัญชีไม่ตรงกับประวัติเรื่องเดิม")
 
             data_list = result.get("data", [])
             if not data_list:

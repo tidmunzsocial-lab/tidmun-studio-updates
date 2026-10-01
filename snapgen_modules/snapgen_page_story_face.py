@@ -366,55 +366,16 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         return "นิทาน 3D"
 
     def _ensure_story_face_history(force=False):
-        has_history = g.get("has_story_face_history")
-        if not force and callable(has_history) and has_history():
-            source = str(batch_source_state.get("text") or "").strip()
-            saved_hash_getter = g.get("get_story_face_hash")
-            saved_hash = saved_hash_getter() if callable(saved_hash_getter) else ""
-            current_hash = hashlib.sha256(source.encode("utf-8")).hexdigest() if source else ""
-            if saved_hash and current_hash and saved_hash != current_hash:
-                raise RuntimeError("ข้อมูลชุดเปลี่ยนเป็นอีกเรื่องแล้ว — กด เปลี่ยนเรื่อง ก่อนสร้าง")
-            getter = g.get("get_story_face_title")
-            title = getter() if callable(getter) else ""
-            root.after(0, lambda value=title: story_face_title_var.set(value))
-            return title
-        source = str(batch_source_state.get("text") or "").strip()
-        if not source:
-            raise RuntimeError("ยังไม่มีข้อมูลชุดนิทาน — กด ข้อมูลชุด แล้วบันทึกก่อน")
-        title = _story_dataset_title(source)
-        root.after(0, lambda: story_face_status_var.set("กำลังส่งเรื่อง..."))
-        ingest = g.get("ingest_story_face_file")
-        if not callable(ingest):
-            raise RuntimeError("ยังไม่มีระบบประวัตินิทาน กรุณาปิดเปิดโปรแกรมใหม่")
-        result = ingest(
-            title, "story_face_dataset.txt", source.encode("utf-8"),
-            log_fn=lambda message: root.after(0, lambda value=message: _new_log(value)),
-        )
-        active_title = str((result or {}).get("story_title") or title).strip()
-        root.after(0, lambda value=active_title: (story_face_title_var.set(value), story_face_status_var.set("")))
-        return active_title
-
-    def _change_story_face_history():
-        if story_face_running[0] or auto_face_running[0]:
-            _new_log("[บทเรื่อง] รอให้งานที่กำลังสร้างเสร็จก่อน")
-            return
-        story_face_title_var.set("")
-        story_face_status_var.set("กำลังเปลี่ยนเรื่อง...")
-        def worker():
-            try:
-                _ensure_story_face_history(force=True)
-                root.after(0, lambda: _new_log("[บทเรื่อง] เริ่มประวัติใหม่ของหน้านิทานแล้ว"))
-            except Exception as exc:
-                root.after(0, lambda error=str(exc): (story_face_status_var.set("เปลี่ยนเรื่องไม่สำเร็จ"), _new_log("[บทเรื่อง] " + error)))
-        threading.Thread(target=worker, daemon=True).start()
-
-    tk.Button(
-        story_history_row, text="เปลี่ยนเรื่อง", command=_change_story_face_history,
-        bg="#EFF6FF", fg="#315A75", activebackground="#DBEAFE", activeforeground="#315A75",
-        relief="flat", bd=0, highlightthickness=1,
-        highlightbackground="#BFDBFE", highlightcolor="#93C5FD", padx=14, pady=7, width=14,
-        font=(SNAPGEN_UI_FONT, 9, "bold"),
-    ).pack(side="right")
+        has_history = g.get("has_main_story_history") or g.get("has_story_face_history")
+        if not callable(has_history) or not has_history():
+            raise RuntimeError("ยังไม่มีประวัติเรื่องหลักจาก Prompt-Ref")
+        getter = g.get("get_story_face_title")
+        title = getter() if callable(getter) else ""
+        root.after(0, lambda value=title: (
+            story_face_title_var.set(value),
+            story_face_status_var.set("ใช้ประวัติหลักจาก Prompt-Ref"),
+        ))
+        return title
 
     new_log = _builder_make_log_box(new_box)
     new_log.pack(fill="x", pady=(8, 0))
@@ -830,7 +791,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             "ออกแบบชุดหนึ่งชุดเป็น 2 ชิ้นแยกกัน เสื้อและท่อนล่างต้องตรงกันด้านยุค อาชีพ ฐานะ สี ผ้า ความเก่าและเหตุการณ์. "
             "ท่อนล่างเลือกกางเกง กระโปรง ผ้าถุง โจงกระเบน หรือชนิดอื่นตามเรื่อง. ห้ามคน หุ่น รองเท้า เครื่องประดับและฉาก."
         )
-        payload = json.dumps({
+        payload_data = {
             "model": "auto", "chatgpt_image_intercept": False,
             "messages": [
                 {"role": "system", "content": system},
@@ -841,7 +802,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                 )},
             ],
             "temperature": 0.2,
-        }, ensure_ascii=False).encode("utf-8")
+        }
+        context_fn = g.get("get_main_story_request_context")
+        if callable(context_fn):
+            payload_data.update(context_fn())
+        payload = json.dumps(payload_data, ensure_ascii=False).encode("utf-8")
         base_fn = globals().get("_chatgpt_api_base")
         base = base_fn() if callable(base_fn) else "http://127.0.0.1:8000/v1"
         request = urllib.request.Request(
@@ -851,6 +816,9 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         )
         with urllib.request.urlopen(request, timeout=180) as response:
             result = json.loads(response.read().decode("utf-8"))
+        advance_fn = g.get("advance_main_story_history")
+        if callable(advance_fn):
+            advance_fn(result)
         content = str((((result.get("choices") or [{}])[0].get("message") or {}).get("content")) or "").replace("```json", "").replace("```", "").strip()
         start, end = content.find("{"), content.rfind("}")
         design = json.loads(content[start:end + 1] if start >= 0 and end > start else content)

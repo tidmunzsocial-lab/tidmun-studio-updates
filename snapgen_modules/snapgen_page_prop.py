@@ -802,7 +802,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         def worker():
             try:
                 prompt = _texture_prompt()
-                payload = {"model": "auto", "prompt": prompt, "n": 1, "aspect_ratio": "1:1", "history_and_training_disabled": False, "_use_prop_history": True}
+                payload = {
+                    "model": "auto", "prompt": prompt, "n": 1,
+                    "aspect_ratio": "1:1", "history_and_training_disabled": True,
+                    "_temporary_chat": True,
+                }
                 ref = texture_ref_image[0]
                 if ref and Path(ref).is_file():
                     encoder = g.get("_encode_image_b64") or globals().get("_encode_image_b64")
@@ -1632,9 +1636,14 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
                     )
                     payload = {
                         "model": "auto", "prompt": prompt, "n": 1,
-                        "aspect_ratio": "1:1", "history_and_training_disabled": False,
-                        "images": [encoder(p)], "_use_prop_history": True,
+                        "aspect_ratio": "1:1",
+                        "history_and_training_disabled": bool(texture_output),
+                        "images": [encoder(p)],
                     }
+                    if texture_output:
+                        payload["_temporary_chat"] = True
+                    else:
+                        payload["_use_prop_history"] = True
                     out_dir = Path(export_prop_dir) / ("textures" if texture_output else "")
                     out = g["_do_image_request"](
                         payload, is_edit=True, prompt=prompt,
@@ -1893,8 +1902,11 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
 
     def _start_new_prop_history():
         try:
-            from snapgen_modules.snapgen_image_gen import reset_prop_conversation
-            reset_prop_conversation()
+            # Reset the module instance the image requests actually use.
+            imgmod = g.get("_imgmod")
+            if imgmod is None:
+                import snapgen_image_gen as imgmod
+            imgmod.reset_prop_conversation()
             _prop_log("[ประวัติ Prop] เริ่มประวัติใหม่แล้ว — งานถัดไปจะเปิดแชทใหม่")
         except Exception as exc:
             _prop_log(f"[ประวัติ Prop] เริ่มใหม่ไม่สำเร็จ: {exc}")

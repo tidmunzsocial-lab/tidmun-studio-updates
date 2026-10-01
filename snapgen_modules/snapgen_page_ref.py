@@ -82,16 +82,14 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
     globals().update(g)
 
     def _bind_ref_story_payload(payload):
-        """Keep every Ref-side GPT request on the same persisted history."""
-        module = globals().get("_imgmod")
-        context_fn = getattr(module, "get_ref_story_request_context", None)
+        """Keep every Ref-side GPT request on the one main story history."""
+        context_fn = g.get("get_main_story_request_context")
         if callable(context_fn):
             payload.update(context_fn())
         return payload
 
     def _advance_ref_story_history(result):
-        module = globals().get("_imgmod")
-        update_fn = getattr(module, "update_ref_story_conversation", None)
+        update_fn = g.get("advance_main_story_history")
         if callable(update_fn):
             update_fn(result)
 
@@ -152,7 +150,6 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         value=(get_ref_story_title() if callable(get_ref_story_title) else "")
     )
     ref_story_status_var = tk.StringVar(value="")
-    ref_story_sending = [False]
     _form_label(story_row, "เรื่อง:", bold=True)
     story_title_box = tk.Frame(
         story_row, width=FORM_FIELD_WIDTH, height=FORM_FIELD_HEIGHT,
@@ -197,73 +194,8 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
             pass
         return "เรื่องจาก Prompt-Ref"
 
-    def _start_ref_story_history():
-        if ref_story_sending[0]:
-            return
-        source_path = Path(BASE) / "prompt_ref_source.txt"
-        try:
-            content = source_path.read_bytes()
-            if not content.strip():
-                raise RuntimeError("ไฟล์บทว่าง")
-        except Exception as exc:
-            ref_story_title_var.set("")
-            _ref_log(f"[บทเรื่อง] ยังส่งไม่ได้: {exc}")
-            return
-        reset = g.get("reset_ref_story_history")
-        if callable(reset):
-            reset()
-        ref_story_title_var.set("")
-        ref_story_status_var.set("กำลังส่งบท...")
-        ref_story_sending[0] = True
-        title = _prompt_ref_story_title()
-
-        def worker():
-            error = None
-            try:
-                ingest = g.get("ingest_ref_story_file")
-                if not callable(ingest):
-                    raise RuntimeError("ยังไม่มีระบบประวัติ Ref")
-                ingest(title, source_path.name, content,
-                       log_fn=lambda message: root.after(0, lambda m=message: _ref_log(m)))
-            except Exception as exc:
-                error = str(exc)
-
-            def finish():
-                ref_story_sending[0] = False
-                if error:
-                    ref_story_title_var.set("")
-                    friendly = g.get("_snapgen_friendly_bridge_error")
-                    message = friendly(error) if callable(friendly) else error
-                    needs_login = g.get("_snapgen_bridge_needs_login")
-                    login_required = bool(needs_login(error)) if callable(needs_login) else False
-                    ref_story_status_var.set("ต้องล็อกอิน ChatGPT ใหม่" if login_required else "ส่งบทไม่สำเร็จ")
-                    _ref_log("[บทเรื่อง] " + message)
-                    if login_required:
-                        open_manager = g.get("manage_bridge")
-                        if callable(open_manager):
-                            root.after(150, open_manager)
-                else:
-                    getter = g.get("get_ref_story_title")
-                    ref_story_title_var.set(getter() if callable(getter) else title)
-                    ref_story_status_var.set("")
-                    _ref_log("[บทเรื่อง] Ref พร้อมใช้ประวัติเรื่องนี้")
-            root.after(0, finish)
-
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
-
-    ref_story_btn = tk.Button(
-        story_row, text="เริ่มประวัติใหม่", command=_start_ref_story_history,
-        bg=STYLE.HISTORY.bg, fg=STYLE.HISTORY.fg,
-        activebackground=STYLE.HISTORY.active_bg, activeforeground=STYLE.HISTORY.active_fg,
-        relief="flat", bd=0, highlightthickness=1,
-        highlightbackground="#BFDBFE", highlightcolor="#93C5FD",
-        padx=14, pady=7, width=14, height=1,
-        font=(SNAPGEN_UI_FONT, 9, "bold"),
-    )
-    ref_story_btn.pack(side="right")
+    ref_story_status_var.set("ใช้ประวัติหลักจาก Prompt-Ref")
     g["ref_story_title_var"] = ref_story_title_var
-    g["start_ref_story_history"] = _start_ref_story_history
 
     row = tk.Frame(box, bg="#FAFAF7")
     row.pack(fill="x", pady=(0, 6))
@@ -1898,7 +1830,7 @@ def install(g: dict, root: tk.Misc) -> tk.Misc:
         title = current_ref_title() if callable(current_ref_title) else ""
         if not valid_ref_story or not title:
             ref_story_title_var.set("")
-            _ref_log("[บทเรื่อง] ยังไม่ได้ส่งบทปัจจุบันเข้า GPT ของหน้า Ref — กด เริ่มประวัติใหม่ ก่อน")
+            _ref_log("[บทเรื่อง] ยังไม่มีประวัติเรื่องหลัก — เริ่มเรื่องจาก Prompt-Ref ก่อน")
             return
         ref_story_title_var.set(title)
         ok_bridge, bridge_msg = _ref_bridge_ready()

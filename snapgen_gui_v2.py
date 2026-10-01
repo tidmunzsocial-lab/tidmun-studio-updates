@@ -807,6 +807,20 @@ def _snapgen_friendly_bridge_error(msg):
             "SnapGen หยุดงานนี้แล้วและไม่ยิงซ้ำ เพื่อไม่ให้เสียโควต้าเพิ่ม\n"
             "รอสักครู่แล้วกดงานเดิมใหม่หนึ่งครั้ง; ถ้ายังเกิดซ้ำค่อย refresh account capture"
         )
+    if (
+        "chatgpt_conversation_not_found" in lowered
+        or "conversation failed: 404" in lowered
+        or ("provider status: 404" in lowered and "chatgpt web request failed" in lowered)
+    ):
+        return (
+            "ไม่พบประวัติ ChatGPT เดิมของเรื่องนี้ในบัญชีที่ Bridge กำลังใช้ — งานนี้จึงหยุดและไม่สร้างแชตใหม่อัตโนมัติ\n\n"
+            "ตรวจสอบ:\n"
+            "1. Bridge Manager ต้องใช้บัญชีเดิมกับตอนเริ่มเรื่อง\n"
+            "2. ถ้าแชตเดิมยังอยู่ ให้ refresh account capture ของบัญชีเดิม แล้ว Restart Bridge\n"
+            "3. ถ้าแชตถูกลบหรือมาจากคนละบัญชี ให้กด เริ่มเรื่องใหม่ ใน Prompt-Ref เอง แล้วส่งบทอีกครั้ง\n\n"
+            "ระบบยังคงกฎประวัติเดียว: หน้า Texture จะไม่เปิดประวัติใหม่เอง\n\n"
+            "รายละเอียดเดิม:\n" + raw
+        )
     if _snapgen_bridge_needs_login(raw):
         return (
             "ต้องล็อกอิน ChatGPT ใหม่ — token ของบัญชีที่ Bridge ใช้อยู่ถูกยกเลิกหรือหมดอายุ\n\n"
@@ -863,23 +877,95 @@ try:
         retry_count=0,
         retry_delay=5,
     )
-    g["reset_image_story_history"] = _imgmod.reset_story_conversation
-    g["has_image_story_history"] = _imgmod.has_story_conversation
-    g["get_image_story_title"] = _imgmod.get_story_title
-    g["ingest_image_story_context"] = _imgmod.ingest_story_context
-    g["ingest_image_story_file"] = _imgmod.ingest_story_file
-    g["reset_ref_story_history"] = _imgmod.reset_ref_story_conversation
-    g["has_ref_story_history"] = _imgmod.has_ref_story_conversation
-    g["get_ref_story_title"] = _imgmod.get_ref_story_title
-    g["ingest_ref_story_file"] = _imgmod.ingest_ref_story_file
-    g["send_ref_story_type_lock"] = _imgmod.send_ref_story_type_lock
-    g["invalidate_histories_for_account"] = _imgmod.invalidate_histories_for_account
-    g["reset_story_face_history"] = _imgmod.reset_story_face_conversation
-    g["has_story_face_history"] = _imgmod.has_story_face_conversation
-    g["get_story_face_title"] = _imgmod.get_story_face_title
-    g["get_story_face_hash"] = _imgmod.get_story_face_hash
-    g["ingest_story_face_file"] = _imgmod.ingest_story_face_file
-    g["analyze_story_face_dataset"] = _imgmod.analyze_story_face_dataset
+    g["has_main_story_history"] = lambda: bool(
+        isinstance(globals().get("_prompt_ref_conversation"), dict)
+        and globals()["_prompt_ref_conversation"].get("conversation_id")
+        and globals()["_prompt_ref_conversation"].get("parent_message_id")
+    )
+
+    def _main_story_title():
+        try:
+            for line in (BASE / "prompt_ref_source.txt").read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                if line.strip():
+                    return line.strip()[:60]
+        except OSError:
+            pass
+        return "เรื่องหลัก" if g["has_main_story_history"]() else ""
+
+    def _main_story_request_context():
+        state = globals().get("_prompt_ref_conversation")
+        if not (
+            isinstance(state, dict)
+            and state.get("conversation_id")
+            and state.get("parent_message_id")
+        ):
+            raise RuntimeError("ยังไม่มีประวัติเรื่องหลักจาก Prompt-Ref")
+        context = {
+            "metadata": {
+                "conversation_id": str(state["conversation_id"]),
+                "parent_message_id": str(state["parent_message_id"]),
+            }
+        }
+        if state.get("account_alias"):
+            context["chatgpt_account"] = str(state["account_alias"])
+        return context
+
+    def _advance_main_story_history(result):
+        state = globals().get("_prompt_ref_conversation")
+        save_fn = globals().get("_save_prompt_ref_conversation")
+        if not isinstance(state, dict):
+            raise RuntimeError("ไม่พบ state ประวัติเรื่องหลัก")
+        expected = str(state.get("conversation_id") or "")
+        returned = str((result or {}).get("conversation_id") or "")
+        parent = str((result or {}).get("parent_message_id") or "")
+        if not returned or not parent:
+            raise RuntimeError("Bridge ไม่คืน cursor ของประวัติเรื่องหลัก")
+        if expected and returned != expected:
+            raise RuntimeError("Bridge เปิดแชตใหม่แทนประวัติเรื่องหลัก — ยกเลิกผลลัพธ์")
+        state["conversation_id"] = returned
+        state["parent_message_id"] = parent
+        if (result or {}).get("chatgpt_account"):
+            state["account_alias"] = str(result["chatgpt_account"])
+        if callable(save_fn):
+            save_fn()
+
+    g["get_main_story_request_context"] = _main_story_request_context
+    g["advance_main_story_history"] = _advance_main_story_history
+
+    def _ingest_main_story_context(ref_images, **kwargs):
+        return _imgmod.ingest_story_context(
+            ref_images,
+            conversation_state=globals().get("_prompt_ref_conversation"),
+            conversation_save_fn=globals().get("_save_prompt_ref_conversation"),
+            **kwargs,
+        )
+
+    g["ingest_image_story_context"] = _ingest_main_story_context
+    g["has_ref_story_history"] = g["has_main_story_history"]
+    g["get_ref_story_title"] = _main_story_title
+    g["has_story_face_history"] = g["has_main_story_history"]
+    g["get_story_face_title"] = _main_story_title
+    def _analyze_story_face_in_main_history(*args, **kwargs):
+        return _imgmod.analyze_story_face_dataset(
+            *args,
+            conversation_state=globals().get("_prompt_ref_conversation"),
+            conversation_save_fn=globals().get("_save_prompt_ref_conversation"),
+            **kwargs,
+        )
+
+    g["analyze_story_face_dataset"] = _analyze_story_face_in_main_history
+
+    def _send_main_story_type_lock(story_type, **kwargs):
+        return _imgmod.send_ref_story_type_lock(
+            story_type,
+            conversation_state=globals().get("_prompt_ref_conversation"),
+            conversation_save_fn=globals().get("_save_prompt_ref_conversation"),
+            **kwargs,
+        )
+
+    g["send_ref_story_type_lock"] = _send_main_story_type_lock
     def _new_do_image_request(payload, is_edit=False, prompt="", name_hint=None,
                                raw_prompt=None, prompt_index=None,
                                output_dir=None, save_sidecar=False):
@@ -887,32 +973,30 @@ try:
         p = prompt or raw_prompt or payload.get("prompt", "")
         ref_imgs = payload.get("images") if is_edit else None
         ar = payload.get("aspect_ratio", "1:1")
-        # This private marker is consumed locally and is never sent to Bridge.
-        # Only the Image AI page sets it. Ref/Prop/Story Face/video therefore
-        # cannot read or overwrite Image AI's continuing story conversation.
+        # Private page markers are consumed locally and never sent to Bridge.
+        # Every story page resolves them to the one Prompt-Ref cursor below.
         use_story_history = bool(payload.get("_use_story_history", False))
-        use_ref_story_history = bool(payload.get("_use_ref_story_history", False))
-        use_story_face_history = bool(payload.get("_use_story_face_history", False))
+        uses_main_story = bool(
+            use_story_history
+            or payload.get("_use_ref_story_history", False)
+            or payload.get("_use_story_face_history", False)
+        )
         conversation_state = None
         conversation_save_fn = None
-        if use_story_history:
+        if uses_main_story:
             # Prompt-Ref, Storyboard, Image Slots, edits and video are one
             # production. Keep one cursor owner so pages cannot split the same
             # story into separate ChatGPT histories.
             conversation_state = globals().get("_prompt_ref_conversation")
             conversation_save_fn = globals().get("_save_prompt_ref_conversation")
-            legacy_cursor = _imgmod.get_image_story_cursor()
-            if isinstance(conversation_state, dict) and not (
-                conversation_state.get("conversation_id")
+            if not (
+                isinstance(conversation_state, dict)
+                and conversation_state.get("conversation_id")
                 and conversation_state.get("parent_message_id")
-            ) and legacy_cursor:
-                conversation_state.update({
-                    "conversation_id": legacy_cursor["conversation_id"],
-                    "parent_message_id": legacy_cursor["parent_message_id"],
-                    "account_alias": legacy_cursor.get("account_alias", ""),
-                })
-                if callable(conversation_save_fn):
-                    conversation_save_fn()
+            ):
+                raise RuntimeError(
+                    "ยังไม่ได้เริ่มเรื่องหลัก — ใช้ปุ่ม เริ่มเรื่องใหม่ ใน Prompt-Ref เพียงจุดเดียว"
+                )
         target_dir = output_dir or str(EXPORT_IMAGE)
         try:
             target_path = Path(target_dir).resolve()
@@ -931,10 +1015,12 @@ try:
                 aspect_ratio=ar,
                 save_sidecar=save_sidecar,
                 use_story_history=False,
-                use_ref_story_history=use_ref_story_history,
-                use_story_face_history=use_story_face_history,
+                use_ref_story_history=False,
+                use_story_face_history=False,
+                use_prop_history=bool(payload.get("_use_prop_history", False)),
                 conversation_state=conversation_state,
                 conversation_save_fn=conversation_save_fn,
+                temporary_chat=bool(payload.get("_temporary_chat", False)),
             )
         except Exception as e:
             raise RuntimeError(_snapgen_friendly_bridge_error(e)) from e
@@ -943,15 +1029,7 @@ try:
     g["_imgmod"] = _imgmod
 
     def _invalidate_downstream_story_histories():
-        """A changed/cleared Prompt-Ref story must not reuse downstream cursors."""
-        for reset_key in (
-            "reset_image_story_history",
-            "reset_ref_story_history",
-            "reset_story_face_history",
-        ):
-            reset_fn = g.get(reset_key)
-            if callable(reset_fn):
-                reset_fn()
+        """Clear page labels after the only story cursor is explicitly reset."""
         for var_key in (
             "img_story_title_var",
             "ref_story_title_var",
@@ -983,11 +1061,11 @@ try:
         g["set_slot_state"](i, "loading", "AI รูป...")
         def worker():
             try:
-                img_path = _imgmod.generate_image(
-                    prompt_text,
-                    output_dir=str(EXPORT_IMAGE),
+                img_path = g["_do_image_request"](
+                    {"prompt": prompt_text, "aspect_ratio": "1:1", "_use_story_history": True},
+                    prompt=prompt_text,
                     name_hint=f"slot{i+1}",
-                 )
+                )
                 def done():
                     g["load_slot_image"](i, img_path)
                     g["append_log"](i, f"AI รูป: สร้างเสร็จ → {os.path.basename(img_path)}")
@@ -1600,14 +1678,9 @@ if callable(_orig_append_log_safe):
 
         try:
             import snapgen_image_gen as image_gen
-            prompt_ref_history = _prompt_ref_cursor_ready()
-            history_cursor = None
-            if prompt_ref_history:
-                history_cursor = {
-                    "conversation_id": str(_prompt_ref_conversation["conversation_id"]),
-                    "parent_message_id": str(_prompt_ref_conversation["parent_message_id"]),
-                    "account_alias": str(_prompt_ref_conversation.get("account_alias") or ""),
-                }
+            if not _prompt_ref_cursor_ready():
+                raise RuntimeError("ยังไม่มีประวัติเรื่องหลักจาก Prompt-Ref")
+            history_cursor = _prompt_ref_conversation
         except Exception as exc:
             g["append_log"](index, "GPT Video Prompt: " + str(exc))
             return
@@ -1644,14 +1717,10 @@ if callable(_orig_append_log_safe):
                     model_name=current_model_name,
                     log_fn=log_from_worker,
                     history_cursor=history_cursor,
+                    conversation_save_fn=_save_prompt_ref_conversation,
                 )
 
                 def complete(text=answer):
-                    if history_cursor is not None:
-                        if str(_prompt_ref_conversation.get("conversation_id") or "") == history_cursor["conversation_id"]:
-                            _prompt_ref_conversation["parent_message_id"] = history_cursor["parent_message_id"]
-                            _prompt_ref_conversation["account_alias"] = history_cursor["account_alias"]
-                            _save_prompt_ref_conversation()
                     prompts[index].delete("1.0", tk.END)
                     prompts[index].insert("1.0", text)
                     prompts[index].focus_set()
@@ -7949,6 +8018,7 @@ def _load_prompt_ref_conversation():
                     or (Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData/Local"))) / "TidMunStudio" / "SnapGenChromeProfile" / "Default")
                 ),
                 "story_hash": str(value.get("story_hash") or ""),
+                "story_type_lock": str(value.get("story_type_lock") or ""),
                 "new_story_requested": bool(value.get("new_story_requested")),
                 "context_ready": bool(value.get("context_ready")),
                 "context_conversation_id": str(value.get("context_conversation_id") or ""),
@@ -7968,6 +8038,7 @@ def _load_prompt_ref_conversation():
             / "TidMunStudio" / "SnapGenChromeProfile" / "Default"
         ),
         "story_hash": "",
+        "story_type_lock": "",
         "new_story_requested": False,
         "context_ready": False,
         "context_conversation_id": "",
@@ -7989,6 +8060,48 @@ def _save_prompt_ref_conversation():
     temp_path.replace(PROMPT_REF_CONVERSATION_PATH)
 
 
+def _remove_legacy_story_conversation_files():
+    for filename in (
+        "image_story_conversation.json",
+        "ref_story_conversation.json",
+        "story_face_conversation.json",
+    ):
+        try:
+            (BASE / "meta" / filename).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _migrate_legacy_story_conversations():
+    """Move the old Image cursor once, then retain only Prompt-Ref state."""
+    legacy_path = BASE / "meta" / "image_story_conversation.json"
+    if not (
+        _prompt_ref_conversation.get("conversation_id")
+        and _prompt_ref_conversation.get("parent_message_id")
+    ) and not _prompt_ref_conversation.get("new_story_requested"):
+        try:
+            legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            legacy = {}
+        if legacy.get("conversation_id") and legacy.get("parent_message_id"):
+            _prompt_ref_conversation.update({
+                "conversation_id": str(legacy["conversation_id"]),
+                "parent_message_id": str(legacy["parent_message_id"]),
+                "conversation_url": f"https://chatgpt.com/c/{legacy['conversation_id']}",
+                "account_alias": str(legacy.get("account_alias") or ""),
+                "story_hash": str(legacy.get("story_hash") or ""),
+            })
+            _save_prompt_ref_conversation()
+    if (
+        _prompt_ref_conversation.get("conversation_id")
+        and _prompt_ref_conversation.get("parent_message_id")
+    ):
+        _remove_legacy_story_conversation_files()
+
+
+_migrate_legacy_story_conversations()
+
+
 def _reset_prompt_ref_conversation():
     _prompt_ref_conversation.update({
         "conversation_id": None,
@@ -8000,6 +8113,7 @@ def _reset_prompt_ref_conversation():
             / "TidMunStudio" / "SnapGenChromeProfile" / "Default"
         ),
         "story_hash": "",
+        "story_type_lock": "",
         "new_story_requested": False,
         "context_ready": False,
         "context_conversation_id": "",
@@ -8008,15 +8122,23 @@ def _reset_prompt_ref_conversation():
         "context_created_at": 0.0,
     })
     _save_prompt_ref_conversation()
+    _remove_legacy_story_conversation_files()
 
 
 def _invalidate_prompt_ref_for_account(active_account):
-    """Drop a Prompt-Ref cursor that belongs to a different Bridge account."""
-    active = str(active_account or "").strip().casefold()
-    bound = str(_prompt_ref_conversation.get("account_alias") or "").strip().casefold()
-    if not active or not bound or bound == active:
+    """Bind an unowned story cursor to the active account; never re-own one.
+
+    A ChatGPT conversation exists only in the account that created it, so
+    rewriting a bound alias routes the next turn to an account that answers
+    404.  The Bridge serves every configured account per request, so keeping
+    the original alias lets the story continue after Bridge Manager Use.
+    """
+    active = str(active_account or "").strip()
+    bound = str(_prompt_ref_conversation.get("account_alias") or "").strip()
+    if not active or active.casefold() in {"free", "default"} or bound:
         return False
-    _reset_prompt_ref_conversation()
+    _prompt_ref_conversation["account_alias"] = active
+    _save_prompt_ref_conversation()
     return True
 
 
@@ -8024,18 +8146,25 @@ g["invalidate_prompt_ref_for_account"] = _invalidate_prompt_ref_for_account
 
 
 def _sync_persisted_histories_to_account(active_account):
-    """Drop every saved cursor that cannot run on the active local Bridge."""
+    """Update local routing aliases; account selection never starts a new story."""
     active = str(active_account or "").strip()
     if not active or active.casefold() in {"free", "default"}:
         return []
-    invalidated = []
+    rebound = []
     invalidate_prompt = g.get("invalidate_prompt_ref_for_account")
     if callable(invalidate_prompt) and invalidate_prompt(active):
-        invalidated.append("Prompt-Ref")
-    invalidate_histories = g.get("invalidate_histories_for_account")
-    if callable(invalidate_histories):
-        invalidated.extend(invalidate_histories(active))
-    return list(dict.fromkeys(invalidated))
+        rebound.append("ประวัติเรื่องหลัก")
+    # Prop is not part of the story: its own chat simply restarts on the new account.
+    try:
+        import snapgen_image_gen as _prop_hist
+        prop_state = _prop_hist._prop_conversation
+        bound = str(prop_state.get("account_alias") or "").strip()
+        if bound and bound.casefold() != active.casefold():
+            _prop_hist.reset_prop_conversation()
+            rebound.append("ประวัติ Prop (เริ่มแชตใหม่)")
+    except Exception:
+        pass
+    return rebound
 
 
 g["sync_persisted_histories_to_account"] = _sync_persisted_histories_to_account
@@ -11795,34 +11924,6 @@ def _open_prompt_bank_ai():
                 root.after(0, fail)
         threading.Thread(target=worker, daemon=True).start()
 
-    def reuse_image_story_history():
-        """Recover a same-story chat from Image AI without starting a new one."""
-        if _prompt_ref_cursor_ready():
-            return True
-        try:
-            import snapgen_image_gen as image_gen
-            cursor = image_gen.get_image_story_cursor()
-            source = source_path.read_text(encoding="utf-8", errors="replace")
-            story_hash = _prompt_ref_story_hash(source)
-            if not cursor or not story_hash or cursor.get("story_hash") != story_hash:
-                return False
-            _prompt_ref_conversation.update({
-                "conversation_id": cursor["conversation_id"],
-                "parent_message_id": cursor["parent_message_id"],
-                "account_alias": cursor.get("account_alias") or "",
-                "story_hash": story_hash,
-                "context_ready": False,
-                "context_conversation_id": "",
-                "context_parent_message_id": "",
-                "context_story_hash": "",
-            })
-            _save_prompt_ref_conversation()
-            return True
-        except (OSError, ValueError, ImportError):
-            return False
-
-    reuse_image_story_history()
-
     def run_prompt_ref_action():
         if _prompt_ref_context_history_ready():
             ai_make(False)
@@ -12638,6 +12739,22 @@ def _restore_image_mode_latest():
             except Exception:
                 pass
         try:
+            uses_main_story = bool(
+                payload.get("_use_story_history", False)
+                or payload.get("_use_ref_story_history", False)
+                or payload.get("_use_story_face_history", False)
+            )
+            conversation_state = None
+            conversation_save_fn = None
+            if uses_main_story:
+                conversation_state = globals().get("_prompt_ref_conversation")
+                conversation_save_fn = globals().get("_save_prompt_ref_conversation")
+                if not (
+                    isinstance(conversation_state, dict)
+                    and conversation_state.get("conversation_id")
+                    and conversation_state.get("parent_message_id")
+                ):
+                    raise RuntimeError("ยังไม่มีประวัติเรื่องหลักจาก Prompt-Ref")
             generated_path = _imgmod.generate_image(
                 p,
                 output_dir=target_dir,
@@ -12647,10 +12764,13 @@ def _restore_image_mode_latest():
                 aspect_ratio=payload.get("aspect_ratio", img_aspect_var.get()),
                 save_sidecar=save_sidecar,
                 log_fn=_img_log,
-                use_story_history=bool(payload.get("_use_story_history", False)),
-                use_ref_story_history=bool(payload.get("_use_ref_story_history", False)),
-                use_story_face_history=bool(payload.get("_use_story_face_history", False)),
+                use_story_history=False,
+                use_ref_story_history=False,
+                use_story_face_history=False,
                 use_prop_history=bool(payload.get("_use_prop_history", False)),
+                conversation_state=conversation_state,
+                conversation_save_fn=conversation_save_fn,
+                temporary_chat=bool(payload.get("_temporary_chat", False)),
             )
             if prompt_index == 11:
                 register_storyboard = g.get("_register_generated_storyboard")
@@ -13249,7 +13369,7 @@ def _restore_image_mode_latest():
                     "temperature": 0.2,
                 }
                 if page_type == "ref":
-                    ref_context_fn = getattr(_imgmod, "get_ref_story_request_context", None)
+                    ref_context_fn = g.get("get_main_story_request_context")
                     if callable(ref_context_fn):
                         payload.update(ref_context_fn())
                 json.dump(payload, f, ensure_ascii=False)
@@ -13262,7 +13382,7 @@ def _restore_image_mode_latest():
             if data.get("error"):
                 raise RuntimeError(json.dumps(data["error"], ensure_ascii=False))
             if page_type == "ref":
-                ref_update_fn = getattr(_imgmod, "update_ref_story_conversation", None)
+                ref_update_fn = g.get("advance_main_story_history")
                 if callable(ref_update_fn):
                     ref_update_fn(data)
             out = (((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
@@ -14772,13 +14892,12 @@ def _install_better_bridge_manager():
                     log_to(log_box, f"กำลังสลับไปใช้ account: {account}")
                     ok = start_bridge(log_box, account)
                     if ok:
-                        invalidated = _sync_persisted_histories_to_account(account)
-                        if invalidated:
+                        rebound = _sync_persisted_histories_to_account(account)
+                        if rebound:
                             log_to(
                                 log_box,
-                                "ล้าง cursor ประวัติที่ผูกกับ account เดิมแล้ว: "
-                                + ", ".join(dict.fromkeys(invalidated))
-                                + " — ต้องส่งบทใหม่ในบัญชีที่เลือก",
+                                "ใช้ account ที่เลือกกับประวัติเดิมแล้ว: "
+                                + ", ".join(dict.fromkeys(rebound)),
                             )
                         log_to(log_box, f"✅ ใช้ account แล้ว: {account}")
                     def refresh_after_use():

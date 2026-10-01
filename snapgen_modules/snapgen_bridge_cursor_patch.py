@@ -10,8 +10,9 @@ import subprocess
 
 MARKER = 'conversation_state: dict[str, str | None] = {'
 FILE_MARKER = 'elif item_type in {"input_file", "file"}:'
-CAPABILITY_VERSION = 6
+CAPABILITY_VERSION = 9
 CAPABILITY_FILE = ".snapgen_bridge_capabilities.json"
+CONVERSATION_NOT_FOUND_MARKER = "chatgpt_conversation_not_found"
 
 
 def _write_capability_version(bridge_dir) -> None:
@@ -25,6 +26,8 @@ def _write_capability_version(bridge_dir) -> None:
         "cursor_message_id_helper": True,
         "image_story_cursor": True,
         "vision_story_cursor": True,
+        "conversation_not_found_error": True,
+        "temporary_image_chat": True,
     }, indent=2) + "\n", encoding="utf-8")
     temp.replace(path)
 
@@ -48,7 +51,15 @@ def runtime_probe(bridge_dir, bridge_python) -> tuple[bool, str]:
         "import inspect; from chatgpt_api.api.openai_compat import _vision_request as vr; "
         "src=inspect.getsource(vr); assert 'vision metadata requires both conversation_id and parent_message_id' in src; "
         "assert 'conversation_state=conversation_state' in src; "
-        "print('DOCX_BRIDGE_OK CURSOR_HELPER_OK VISION_CURSOR_OK')"
+        "from chatgpt_api.providers.chatgpt.transport import ChatGPTWebTransport as wt; "
+        "img=inspect.getsource(wt._generate_image_sync); "
+        "assert 'self._repair_invalid_conversation_parent(payload, headers)' in img; "
+        "assert 'ChatGPT image response switched conversation' in img; "
+        "builder=inspect.getsource(wt._build_image_chat_payload); "
+        "assert '# SnapGen temporary image chat' in builder; "
+        "from chatgpt_api.api.openai_compat import _classify_provider_error as classify; "
+        "assert classify('ChatGPT conversation failed: 404', 404)[0]=='chatgpt_conversation_not_found'; "
+        "print('DOCX_BRIDGE_OK CURSOR_HELPER_OK VISION_CURSOR_OK IMAGE_CURSOR_STRICT_OK')"
     )
     try:
         result = subprocess.run(
@@ -388,6 +399,42 @@ def _install_cursor_message_id_helper(bridge_dir, log) -> bool:
     log("✓ Bridge รองรับ parent message cursor ครบแล้ว")
     return True
 
+
+def _install_conversation_not_found_error(bridge_dir, log) -> bool:
+    """Classify a missing continuation chat instead of reporting a generic 502."""
+    path = Path(bridge_dir) / "chatgpt_api" / "api" / "openai_compat.py"
+    if not path.is_file():
+        raise RuntimeError(f"ไม่พบ Bridge source: {path}")
+    source = path.read_text(encoding="utf-8")
+    if CONVERSATION_NOT_FOUND_MARKER in source:
+        return False
+
+    anchor = '    if provider_status in {401, 403}:\n'
+    replacement = (
+        '    if provider_status == 404 and "conversation failed" in normalized:\n'
+        '        return (\n'
+        '            "chatgpt_conversation_not_found",\n'
+        '            "invalid_request_error",\n'
+        '            409,\n'
+        '            "The requested ChatGPT conversation was not found for the selected account. "\n'
+        '            "Verify the account capture; if the conversation was deleted or belongs to another account, "\n'
+        '            "start a new story explicitly. The bridge will not create a new conversation automatically.",\n'
+        '        )\n'
+        + anchor
+    )
+    if anchor not in source:
+        raise RuntimeError("ไม่พบตำแหน่งจัดประเภท conversation 404 ใน Bridge")
+    source = source.replace(anchor, replacement, 1)
+    temp = path.with_suffix(path.suffix + ".conversation-404.tmp")
+    try:
+        temp.write_text(source, encoding="utf-8")
+        py_compile.compile(str(temp), doraise=True)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+    log("✓ Bridge แยกข้อผิดพลาดประวัติ ChatGPT ที่หายออกจาก 502 แล้ว")
+    return True
+
 def cursor_supported(bridge_dir) -> bool:
     path = Path(bridge_dir) / "chatgpt_api" / "api" / "openai_compat.py"
     try:
@@ -402,6 +449,7 @@ def install(bridge_dir, log=print) -> bool:
     file_changed = _install_file_upload(bridge_dir, log)
     robust_changed = _install_robust_upload(bridge_dir, log)
     helper_changed = _install_cursor_message_id_helper(bridge_dir, log)
+    conversation_error_changed = _install_conversation_not_found_error(bridge_dir, log)
     from snapgen_bridge_image_cursor_patch import install as _install_image_cursor
     image_cursor_changed = _install_image_cursor(bridge_dir, log)
     from snapgen_bridge_vision_cursor_patch import install as _install_vision_cursor
@@ -412,7 +460,7 @@ def install(bridge_dir, log=print) -> bool:
     text = path.read_text(encoding="utf-8")
     if cursor_supported(bridge_dir):
         _write_capability_version(bridge_dir)
-        return file_changed or robust_changed or helper_changed or image_cursor_changed or vision_cursor_changed
+        return file_changed or robust_changed or helper_changed or conversation_error_changed or image_cursor_changed or vision_cursor_changed
 
     replacements = [
         (

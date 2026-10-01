@@ -735,8 +735,8 @@ class MobileController:
                     raise ValueError("เลือกรูปเข้า Slot ก่อน")
                 if action == "video_generate" and not str(data.get("prompt", text_value(g["slot_prompts"][i]))).strip():
                     raise ValueError("ใส่ Prompt วิดีโอก่อนกด Generate this")
-                if action == "video_gpt" and not g.get("has_image_story_history", lambda: False)():
-                    raise ValueError("ยังไม่มีประวัติเรื่อง ไปหน้าสร้างรูปแล้วกด เริ่มประวัติใหม่ ก่อนใช้ GPT")
+                if action == "video_gpt" and not g.get("has_main_story_history", lambda: False)():
+                    raise ValueError("ยังไม่มีประวัติเรื่องหลัก ให้เริ่มเรื่องจาก Prompt-Ref ก่อนใช้ GPT")
             self._video_fields(i, data)
             if action == "video_generate":
                 # This page is video creation, not the desktop's separate voice-only mode.
@@ -774,11 +774,6 @@ class MobileController:
             if action == "image_clear_gallery":
                 image["clear_gallery"]()
                 return "ล้างแกลเลอรีแล้ว ไฟล์ผลงานยังอยู่บนคอม"
-            if action == "image_new_history":
-                if not (self.base / "snapgen_data" / "prompt_ref_source.txt").is_file():
-                    raise ValueError("ยังไม่มีบท Prompt-Ref ในโปรแกรม")
-                image["new_history"]()
-                return "กำลังส่งบทหลักและเริ่มประวัติใหม่ ดู Log ด้านล่าง"
             if action == "image_edit":
                 path = self.resolve_media(data.get("media"))
                 instruction = str(data.get("instruction", "")).strip()

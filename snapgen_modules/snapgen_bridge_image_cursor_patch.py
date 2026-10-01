@@ -6,6 +6,7 @@ from pathlib import Path
 import py_compile
 
 MARKER = "# SnapGen image history cursor"
+STRICT_MARKER = "# SnapGen image history cursor v2: preserve exactly one conversation"
 
 
 def _replace_once(source: str, old: str, new: str, label: str) -> str:
@@ -26,12 +27,16 @@ def image_cursor_supported(bridge_dir) -> bool:
     return all((
         MARKER in compat,
         MARKER in transport,
+        STRICT_MARKER in transport,
         'metadata = dict(request_metadata)' in compat,
         'result["conversation_id"] = conversation_id' in compat,
         'result["parent_message_id"] = parent_message_id' in compat,
         'conversation_id = request.metadata.get("conversation_id")' in transport,
         'payload["conversation_id"] = conversation_id' in transport,
         '"parent_message_id": parent_message_id' in transport,
+        'self._repair_invalid_conversation_parent(payload, headers)' in transport,
+        'ChatGPT image response switched conversation' in transport,
+        '# SnapGen temporary image chat' in transport,
     ))
 
 
@@ -95,6 +100,29 @@ def _patch_compat(source: str) -> str:
 
 
 def _patch_transport(source: str) -> str:
+    # Older SnapGen releases may already have the strict cursor patch. Add the
+    # temporary-image flag without replaying every historical replacement.
+    if STRICT_MARKER in source and "# SnapGen temporary image chat" not in source:
+        function_start = source.index("    def _build_image_chat_payload(")
+        function_end = source.find("\n    def ", function_start + 20)
+        if function_end < 0:
+            raise RuntimeError("Bridge image payload function boundary not found")
+        block = source[function_start:function_end]
+        old = '''        if isinstance(conversation_id, str) and conversation_id:
+            payload["conversation_id"] = conversation_id
+        return payload
+'''
+        new = '''        if isinstance(conversation_id, str) and conversation_id:
+            payload["conversation_id"] = conversation_id
+        # SnapGen temporary image chat: keep utility images out of story history.
+        history_disabled = request.metadata.get("history_and_training_disabled")
+        if isinstance(history_disabled, bool):
+            payload["history_and_training_disabled"] = history_disabled
+        return payload
+'''
+        block = _replace_once(block, old, new, "temporary image chat")
+        return source[:function_start] + block + source[function_end:]
+
     event_old = '''        conversation_id = _conversation_id_from_events(events)
         on_conversation_id = request.metadata.get("on_conversation_id")
 '''
@@ -109,6 +137,41 @@ def _patch_transport(source: str) -> str:
         on_conversation_id = request.metadata.get("on_conversation_id")
 '''
     source = _replace_once(source, event_old, event_new, "image event cursor")
+
+    repair_old = '''        payload = self._build_image_chat_payload(request, uploaded_files)
+        if self.refresh_web_tokens:
+'''
+    repair_new = '''        payload = self._build_image_chat_payload(request, uploaded_files)
+        # SnapGen image history cursor v2: preserve exactly one conversation.
+        # Text turns already repair a stale parent from the durable mapping;
+        # image turns must do the same before sending to ChatGPT.
+        self._repair_invalid_conversation_parent(payload, headers)
+        if self.refresh_web_tokens:
+'''
+    source = _replace_once(source, repair_old, repair_new, "image parent repair")
+
+    strict_old = '''        conversation_id = _conversation_id_from_events(events)
+        if not conversation_id:
+            saved_conversation_id = request.metadata.get("conversation_id")
+            conversation_id = saved_conversation_id if isinstance(saved_conversation_id, str) else None
+        parent_message_id = _latest_message_id_from_value(events)
+'''
+    strict_new = '''        conversation_id = _conversation_id_from_events(events)
+        saved_conversation_id = request.metadata.get("conversation_id")
+        if not conversation_id:
+            conversation_id = saved_conversation_id if isinstance(saved_conversation_id, str) else None
+        if (
+            isinstance(saved_conversation_id, str)
+            and saved_conversation_id
+            and conversation_id != saved_conversation_id
+        ):
+            raise ProviderError(
+                "ChatGPT image response switched conversation "
+                f"from {saved_conversation_id} to {conversation_id}"
+            )
+        parent_message_id = _latest_message_id_from_value(events)
+'''
+    source = _replace_once(source, strict_old, strict_new, "strict image conversation")
 
     return_old = '''        return ImageResponse(images=images, prompt=request.prompt, raw={"events": events, "assets": assets})
 '''
@@ -160,6 +223,18 @@ def _patch_transport(source: str) -> str:
         return payload
 '''
     block = _replace_once(block, payload_return_old, payload_return_new, "image conversation id")
+
+    temporary_old = payload_return_new
+    temporary_new = '''        }
+        if isinstance(conversation_id, str) and conversation_id:
+            payload["conversation_id"] = conversation_id
+        # SnapGen temporary image chat: keep utility images out of story history.
+        history_disabled = request.metadata.get("history_and_training_disabled")
+        if isinstance(history_disabled, bool):
+            payload["history_and_training_disabled"] = history_disabled
+        return payload
+'''
+    block = _replace_once(block, temporary_old, temporary_new, "temporary image chat")
     return source[:function_start] + block + source[function_end:]
 
 

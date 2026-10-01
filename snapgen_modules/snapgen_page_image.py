@@ -90,18 +90,15 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     prompt_frame.columnconfigure(0, weight=1)
     prompt_frame.columnconfigure(1, weight=0)
 
-    # Story header: a new Image AI history must learn the whole story before
-    # generating scenes. Keep this compact above Prompt; do not mix it with Prompt-Ref.
+    # This page displays the one Prompt-Ref story. Only Prompt-Ref owns the
+    # New Story action and the conversation cursor.
     story_header = tk.Frame(prompt_frame, bg=BG)
     story_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 3))
     story_header.columnconfigure(2, weight=1)
-    get_saved_story_title = g.get("get_image_story_title")
+    has_main_story = g.get("has_main_story_history")
     story_title_var = tk.StringVar(
-        value=(get_saved_story_title() if callable(get_saved_story_title) else "")
+        value=(_load_prompt_ref_story_title() if callable(has_main_story) and has_main_story() else "")
     )
-    story_file_var = tk.StringVar(value="")
-    story_file_path = [Path(__file__).resolve().parent.parent / "snapgen_data" / "prompt_ref_source.txt"]
-    story_file_state = {"ready": False, "sending": False}
     tk.Label(story_header, text="เรื่อง:", bg=BG, fg="#111", font=(SNAPGEN_UI_FONT, 9, "bold")).grid(row=0, column=0, sticky="w")
     tk.Label(
         story_header, textvariable=story_title_var, width=32, anchor="w",
@@ -112,7 +109,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     # right edge visually aligned with the box while separating it from title.
     top_actions = tk.Frame(story_header, bg=BG)
     top_actions.grid(row=0, column=2, sticky="e", padx=(8, 0))
-    for column in range(2):
+    for column in range(1):
         top_actions.columnconfigure(column, weight=1, uniform="image_top_action")
 
     clear_gallery_btn = _btn(
@@ -120,21 +117,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         lambda: (g.get("clear_gallery") or (lambda: None))(),
         padx=DEFAULT_PADX, pady=DEFAULT_PADY,
     )
-    new_story_btn = _btn(
-        top_actions, "เริ่มประวัติใหม่", STYLE.HISTORY.bg,
-        lambda: _start_new_story_history(),
-        padx=DEFAULT_PADX, pady=DEFAULT_PADY,
-        fg=STYLE.HISTORY.fg,
-    )
-    new_story_btn.configure(
-        activebackground=STYLE.HISTORY.active_bg,
-        activeforeground=STYLE.HISTORY.active_fg,
-        highlightthickness=1,
-        highlightbackground="#BFDBFE",
-        highlightcolor="#93C5FD",
-        bd=0,
-    )
-    for column, button in enumerate((clear_gallery_btn, new_story_btn)):
+    for column, button in enumerate((clear_gallery_btn,)):
         button.configure(width=DEFAULT_WIDTH)
         button.grid(
             row=0,
@@ -759,109 +742,13 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     manual_refs = []
     prompt_drop_refs = []
     folder_ref_names = []
-    has_saved_story = g.get("has_image_story_history")
+    has_saved_story = g.get("has_main_story_history")
     story_context_state = {
         # A complete persisted cursor means GPT already received the context
         # before SnapGen was closed. Do not force the user to upload it again.
         "ready": bool(has_saved_story()) if callable(has_saved_story) else False,
         "sending": False,
     }
-
-    def _upload_story_file():
-        title = _load_prompt_ref_story_title()
-        story_title_var.set("")
-        path = story_file_path[0]
-        if not path or not Path(path).is_file():
-            (g.get("show_error") or (lambda _t, _m: _log(_m)))(
-                "ไม่พบบทหลัก", "ไปหน้า Prompt-Ref แล้วอัปโหลดบทหลักก่อน"
-            )
-            return
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="replace")
-            text = str(text or "").strip()
-            if not text:
-                raise RuntimeError("ไฟล์บทว่าง")
-        except Exception as exc:
-            (g.get("show_error") or (lambda _t, _m: _log(_m)))("อ่านบทไม่สำเร็จ", str(exc))
-            return
-        reset_history = g.get("reset_image_story_history")
-        if callable(reset_history):
-            reset_history()
-        story_context_state["ready"] = False
-        story_context_state["sending"] = False
-        story_file_state["ready"] = False
-        story_file_state["sending"] = True
-        story_file_path[0] = Path(path)
-        story_file_var.set("กำลังส่งบท...")
-        _log(f"[บทเรื่อง] เริ่มประวัติใหม่: {title} — ส่งบทหลักจาก Prompt-Ref")
-
-        def worker():
-            error = None
-            ingest_result = None
-            try:
-                ingest = g.get("ingest_image_story_file")
-                if not callable(ingest):
-                    raise RuntimeError("ยังไม่มีระบบส่งไฟล์บท กรุณาปิดเปิดโปรแกรมใหม่")
-                ingest_result = ingest(
-                    title, Path(path).name, text.encode("utf-8"),
-                    log_fn=lambda message: root.after(0, lambda m=message: _log(m)),
-                )
-            except Exception as exc:
-                error = str(exc)
-
-            def finish():
-                story_file_state["sending"] = False
-                story_file_state["ready"] = error is None
-                story_context_state["sending"] = False
-                story_context_state["ready"] = error is None
-                if error:
-                    friendly = g.get("_snapgen_friendly_bridge_error")
-                    message = friendly(error) if callable(friendly) else error
-                    needs_login = g.get("_snapgen_bridge_needs_login")
-                    login_required = bool(needs_login(error)) if callable(needs_login) else False
-                    story_file_var.set("ต้องล็อกอิน ChatGPT ใหม่" if login_required else "ส่งบทไม่สำเร็จ")
-                    _log("❌ [บทเรื่อง] " + message)
-                    if login_required:
-                        open_manager = g.get("manage_bridge")
-                        if callable(open_manager):
-                            root.after(150, open_manager)
-                else:
-                    uploaded_title = (
-                        str((ingest_result or {}).get("story_title") or "").strip()
-                        if isinstance(ingest_result, dict) else ""
-                    )
-                    story_title_var.set(uploaded_title or title)
-                    story_file_var.set("")
-                    _log("[บทเรื่อง] พร้อมสร้างรูปในประวัติเรื่องนี้")
-            root.after(0, finish)
-
-        import threading
-        threading.Thread(target=worker, daemon=True).start()
-
-    story_status_label = tk.Label(story_header, textvariable=story_file_var, bg=BG, fg="#6B7280", anchor="w")
-
-    def _sync_story_status(*_args):
-        if story_file_var.get().strip():
-            story_status_label.grid(row=1, column=1, sticky="w", pady=(2, 0))
-        else:
-            story_status_label.grid_remove()
-
-    story_file_var.trace_add("write", _sync_story_status)
-    _sync_story_status()
-
-    def _start_new_story_history():
-        reset_history = g.get("reset_image_story_history")
-        if callable(reset_history):
-            reset_history()
-        story_title_var.set("")
-        story_context_state["ready"] = False
-        story_context_state["sending"] = False
-        story_file_state["ready"] = False
-        story_file_state["sending"] = False
-        story_file_path[0] = Path(__file__).resolve().parent.parent / "snapgen_data" / "prompt_ref_source.txt"
-        story_file_var.set("กำลังส่งบท Prompt-Ref...")
-        _log("เริ่มประวัติเรื่องใหม่แล้ว — กำลังส่งบทหลักจาก Prompt-Ref เข้า GPT")
-        _upload_story_file()
 
     def _attach_refs():
         from tkinter import filedialog
@@ -1271,8 +1158,8 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
             if not Path(p).is_file():
                 _log(f"[แก้รูป] ไม่พบรูป: {p}")
                 return
-            if story_file_state["sending"] or story_context_state["sending"]:
-                _log("[แก้รูป] รอให้ระบบส่งบทหรือบริบทเสร็จก่อน")
+            if story_context_state["sending"]:
+                _log("[แก้รูป] รอให้ระบบส่งบริบทเสร็จก่อน")
                 return
             if busy[0]:
                 _log("[แก้รูป] กำลังสร้างหรือแก้รูปอยู่ — รอให้งานเดิมเสร็จก่อน")
@@ -1345,7 +1232,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
                         "aspect_ratio": img_aspect_var.get(),
                         "images": edit_images,
                         # Continue the exact story chat established by
-                        # "เริ่มประวัติใหม่"; never create a separate edit chat.
+                        # Prompt-Ref's "เริ่มเรื่องใหม่"; never create a separate edit chat.
                         "_use_story_history": True,
                     }
                     out = do_req(
@@ -1621,12 +1508,6 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         if not prompt:
             (g.get("show_error") or (lambda _t, _m: _log(_m)))("สร้างรูป", "ใส่ prompt ก่อน")
             return
-        if story_file_state["sending"]:
-            _log("กำลังส่งบททั้งเรื่องเข้า GPT — รอให้เสร็จก่อนสร้างรูป")
-            return
-        if story_file_var.get().startswith("กำลังส่งบท") and not story_file_state["ready"]:
-            _log("บท Prompt-Ref ยังไม่พร้อม — รอให้ GPT รับบทก่อนสร้างรูป")
-            return
         if story_context_state["sending"]:
             _log("กำลังส่งบริบทเหตุการณ์เข้า GPT — รอให้เสร็จก่อนสร้างรูป")
             return
@@ -1732,7 +1613,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
                     "prompt": request_prompt,
                     "aspect_ratio": img_aspect_var.get(),
                     # Every Image AI action continues this page's story chat.
-                    # Only the "เริ่มประวัติใหม่" button may clear that chat.
+                    # Only Prompt-Ref's "เริ่มเรื่องใหม่" button may clear that chat.
                     "_use_story_history": True,
                     "_story_run_id": run.get("run_id"),
                     "_storyboard_path": run.get("storyboard_path"),
@@ -2101,7 +1982,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         manual_refs.clear()
         story_context_state["ready"] = False
         story_context_state["sending"] = False
-        _save_ref_state(); _log("ล้างรูปบริบทแล้ว — ประวัติที่ GPT รับรู้ไปแล้วจะหายเมื่อกดเริ่มประวัติใหม่"); _update_ref_highlight()
+        _save_ref_state(); _log("ล้างรูปบริบทแล้ว — ประวัติ GPT เดิมยังอยู่จนกด เริ่มเรื่องใหม่ ใน Prompt-Ref"); _update_ref_highlight()
 
     def _clear_gallery():
         """Clear only the on-screen gallery. Real files stay in export/image."""
@@ -2244,7 +2125,7 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
     # Mobile uses these exact page callbacks, including their validation and history.
     g["mobile_image_actions"] = {
         "generate": _generate, "storyboard": _storyboard, "auto": _auto_gen,
-        "new_history": _start_new_story_history, "clear_gallery": _clear_gallery,
+        "clear_gallery": _clear_gallery,
         "camera": _set_camera_mode, "attach": lambda paths: _drop_prompt_images(paths=paths),
         "edit": _mobile_edit, "refs": _list_ref_files, "clear_ref_folder": _clear_ref_folder,
         "gallery": lambda: list(gallery_paths), "auto_state": auto_gen_state,
@@ -2273,8 +2154,6 @@ def install(g: dict, root: tk.Misc) -> Dict[str, Any]:
         "img_busy": busy,
         "img_gallery_first_row": first_row,
         "img_story_title_var": story_title_var,
-        "img_story_file_var": story_file_var,
-        "img_story_file_state": story_file_state,
         "image_action_buttons": [gen_btn, prompt_btn, clear_gallery_btn],
         "img_side_controls": side_controls,
         "img_character_frame": character_frame,
